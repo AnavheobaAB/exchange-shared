@@ -1,0 +1,33 @@
+/target
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+
+# Coverage
+coverage/
+*.lcov
+
+# Build artifacts
+*.pdb
