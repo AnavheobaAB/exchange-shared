@@ -9,6 +9,7 @@ use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLaye
 
 use config::DbPool;
 use modules::auth::auth_routes;
+use modules::swap::swap_routes;
 use services::jwt::JwtService;
 use services::rate_limit::{create_rate_limiter, RateLimitLayer};
 use services::security::security_headers;
@@ -33,6 +34,7 @@ pub async fn create_app(db: DbPool, jwt_service: JwtService) -> Router {
         .route("/", get(root))
         .route("/health", get(health_check))
         .nest("/auth", auth_routes())
+        .nest("/swap", swap_routes())
         .layer(middleware::from_fn(security_headers))
         .layer(RequestBodyLimitLayer::new(1024 * 100)) // 100KB max body
         .layer(RateLimitLayer::new(rate_limiter))
