@@ -1,18 +1,63 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::StatusCode,
     Json,
 };
 use std::sync::Arc;
 
 use crate::AppState;
-use super::crud::{SwapCrud, SwapError};
+use super::crud::{SwapCrud};
 use super::schema::{
-    ProvidersQuery, ProviderResponse, ProviderDetailResponse, SwapErrorResponse,
+    CurrenciesQuery, CurrencyResponse, ProvidersQuery, ProviderResponse, SwapErrorResponse,
 };
+use crate::services::trocador::TrocadorClient;
 
 // =============================================================================
-// GET /swap/providers - List exchange providers
+// GET /swap/currencies - List all currencies
+// =============================================================================
+
+pub async fn get_currencies(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CurrenciesQuery>,
+) -> Result<Json<Vec<CurrencyResponse>>, (StatusCode, Json<SwapErrorResponse>)> {
+    let crud = SwapCrud::new(state.db.clone());
+
+    // Check if we need to sync from Trocador
+    let should_sync = crud.should_sync_currencies().await.unwrap_or(true);
+
+    if should_sync {
+        // Get API key from environment
+        let api_key = std::env::var("TROCADOR_API_KEY").unwrap_or_default();
+        
+        if !api_key.is_empty() {
+            let trocador_client = TrocadorClient::new(api_key);
+            
+            // Sync in background, don't fail request if sync fails
+            if let Err(e) = crud.sync_currencies_from_trocador(&trocador_client).await {
+                tracing::warn!("Failed to sync currencies from Trocador: {}", e);
+            }
+        }
+    }
+
+    // Get currencies from database (cache)
+    let currencies = crud.get_currencies(query).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(SwapErrorResponse::new(e.to_string())),
+        )
+    })?;
+
+    // Convert to response format
+    let responses: Vec<CurrencyResponse> = currencies
+        .into_iter()
+        .map(|c| c.into())
+        .collect();
+
+    Ok(Json(responses))
+}
+
+// =============================================================================
+// GET /swap/providers - List all exchange providers
 // =============================================================================
 
 pub async fn get_providers(
@@ -21,6 +66,22 @@ pub async fn get_providers(
 ) -> Result<Json<Vec<ProviderResponse>>, (StatusCode, Json<SwapErrorResponse>)> {
     let crud = SwapCrud::new(state.db.clone());
 
+    // Check if we need to sync from Trocador
+    let should_sync = crud.should_sync_providers().await.unwrap_or(true);
+
+    if should_sync {
+        let api_key = std::env::var("TROCADOR_API_KEY").unwrap_or_default();
+        
+        if !api_key.is_empty() {
+            let trocador_client = TrocadorClient::new(api_key);
+            
+            if let Err(e) = crud.sync_providers_from_trocador(&trocador_client).await {
+                tracing::warn!("Failed to sync providers from Trocador: {}", e);
+            }
+        }
+    }
+
+    // Get providers from database (cache)
     let providers = crud.get_providers(query).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -28,31 +89,11 @@ pub async fn get_providers(
         )
     })?;
 
-    Ok(Json(providers))
-}
+    // Convert to response format
+    let responses: Vec<ProviderResponse> = providers
+        .into_iter()
+        .map(|p| p.into())
+        .collect();
 
-// =============================================================================
-// GET /swap/providers/:id - Get single provider details
-// =============================================================================
-
-pub async fn get_provider(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<ProviderDetailResponse>, (StatusCode, Json<SwapErrorResponse>)> {
-    let crud = SwapCrud::new(state.db.clone());
-
-    let provider = crud.get_provider_by_id(&id).await.map_err(|e| {
-        match e {
-            SwapError::ProviderNotFound => (
-                StatusCode::NOT_FOUND,
-                Json(SwapErrorResponse::with_code("Provider not found", "PROVIDER_NOT_FOUND")),
-            ),
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(SwapErrorResponse::new(e.to_string())),
-            ),
-        }
-    })?;
-
-    Ok(Json(provider))
+    Ok(Json(responses))
 }

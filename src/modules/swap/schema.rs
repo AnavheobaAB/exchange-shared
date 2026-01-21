@@ -5,76 +5,95 @@ use chrono::{DateTime, Utc};
 // PROVIDERS
 // =============================================================================
 
+// Request query parameters for /swap/providers
 #[derive(Debug, Deserialize)]
 pub struct ProvidersQuery {
-    #[serde(default)]
-    pub include_inactive: bool,
-    pub kyc_required: Option<bool>,
-    pub rate_type: Option<String>,
-    pub sort: Option<String>,
+    pub rating: Option<String>,         // Filter by KYC rating (A, B, C, D)
+    pub markup_enabled: Option<bool>,   // Filter by markup support
+    pub sort: Option<String>,           // Sort by: name, rating, eta
 }
 
+// Response DTO matching Trocador's /exchanges format EXACTLY
 #[derive(Debug, Serialize)]
 pub struct ProviderResponse {
-    pub id: String,
     pub name: String,
-    pub is_active: bool,
-    pub kyc_required: bool,
-    pub rating: f32,
-    pub supports_fixed_rate: bool,
-    pub supports_floating_rate: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logo_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub website_url: Option<String>,
+    pub rating: String,           // Maps from kyc_rating (A/B/C/D)
+    pub insurance: f64,           // Maps from insurance_percentage
+    pub markup_enabled: bool,     // Maps from markup_enabled (note: Trocador uses "enabledmarkup")
+    pub eta: i32,                 // Maps from eta_minutes
 }
 
-#[derive(Debug, Serialize)]
-pub struct ProviderDetailResponse {
-    pub id: String,
+// Trocador's /exchanges response format (what we GET from them)
+#[derive(Debug, Deserialize)]
+pub struct TrocadorProvider {
     pub name: String,
-    pub is_active: bool,
-    pub kyc_required: bool,
-    pub rating: f32,
-    pub supports_fixed_rate: bool,
-    pub supports_floating_rate: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logo_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub website_url: Option<String>,
-    pub supported_currencies: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_amount: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_amount: Option<f64>,
-    pub fee_percentage: f64,
+    pub rating: String,           // A, B, C, or D
+    pub insurance: f64,
+    #[serde(rename = "enabledmarkup")]
+    pub enabled_markup: bool,     // Note the different naming
+    pub eta: f64,                 // Trocador returns this as float, we'll convert to i32
+}
+
+impl From<crate::modules::swap::model::Provider> for ProviderResponse {
+    fn from(p: crate::modules::swap::model::Provider) -> Self {
+        Self {
+            name: p.name,
+            rating: p.kyc_rating,
+            insurance: p.insurance_percentage.unwrap_or(0.015),
+            markup_enabled: p.markup_enabled,
+            eta: p.eta_minutes.unwrap_or(10),
+        }
+    }
 }
 
 // =============================================================================
 // CURRENCIES
 // =============================================================================
 
+// Request query parameters for /swap/currencies
 #[derive(Debug, Deserialize)]
 pub struct CurrenciesQuery {
-    pub network: Option<String>,
-    pub search: Option<String>,
-    #[serde(default)]
-    pub include_inactive: bool,
+    pub ticker: Option<String>,         // Filter by ticker (e.g., "btc")
+    pub network: Option<String>,        // Filter by network (e.g., "Mainnet")
+    pub memo: Option<bool>,             // Filter by memo required
 }
 
+// Response DTO matching Trocador's /coins format EXACTLY
 #[derive(Debug, Serialize)]
 pub struct CurrencyResponse {
-    pub symbol: String,
     pub name: String,
+    pub ticker: String,       // Maps from symbol
     pub network: String,
-    pub is_active: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logo_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub contract_address: Option<String>,
-    pub requires_extra_id: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extra_id_name: Option<String>,
+    pub memo: bool,           // Maps from requires_extra_id
+    pub image: String,        // Maps from logo_url
+    pub minimum: f64,         // Maps from min_amount
+    pub maximum: f64,         // Maps from max_amount
+}
+
+// Trocador's /coins response format (what we GET from them)
+#[derive(Debug, Deserialize)]
+pub struct TrocadorCurrency {
+    pub name: String,
+    pub ticker: String,
+    pub network: String,
+    pub memo: bool,
+    pub image: String,
+    pub minimum: f64,
+    pub maximum: f64,
+}
+
+impl From<crate::modules::swap::model::Currency> for CurrencyResponse {
+    fn from(c: crate::modules::swap::model::Currency) -> Self {
+        Self {
+            name: c.name,
+            ticker: c.symbol,
+            network: c.network,
+            memo: c.requires_extra_id,
+            image: c.logo_url.unwrap_or_else(|| String::from("")),
+            minimum: c.min_amount.unwrap_or(0.0),
+            maximum: c.max_amount.unwrap_or(0.0),
+        }
+    }
 }
 
 // =============================================================================

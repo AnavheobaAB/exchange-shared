@@ -2,10 +2,11 @@ use axum::{routing::get, Router};
 use std::sync::Arc;
 
 use crate::AppState;
-use super::controller;
+use super::controller::{get_currencies, get_providers};
 
 pub fn swap_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/providers", get(controller::get_providers))
-        .route("/providers/{id}", get(controller::get_provider))
+        .route("/currencies", get(get_currencies))
+        .route("/providers", get(get_providers))
+        // Other routes to be added later...
 }

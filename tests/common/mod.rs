@@ -1,11 +1,14 @@
 use axum_test::TestServer;
 use sqlx::{MySql, Pool};
 
+// Allow dead_code for utilities used by other test files
+#[allow(dead_code)]
 pub struct TestContext {
     pub server: TestServer,
     pub db: Pool<MySql>,
 }
 
+#[allow(dead_code)]
 impl TestContext {
     pub async fn new() -> Self {
         dotenvy::dotenv().ok();
@@ -61,12 +64,20 @@ impl TestContext {
 }
 
 // Helper to generate unique test email
+#[allow(dead_code)]
 pub fn test_email() -> String {
     format!("test_{}@example.com", uuid::Uuid::new_v4())
 }
 
 // Helper to generate test password
+#[allow(dead_code)]
 pub fn test_password() -> &'static str {
     "TestPassword123!"
 }
 
+// Helper to setup test server (simplified for swap tests)
+#[allow(dead_code)]
+pub async fn setup_test_server() -> TestServer {
+    let ctx = TestContext::new().await;
+    ctx.server
+}

@@ -14,13 +14,14 @@ pub struct Provider {
     pub name: String,
     pub slug: String,
     pub is_active: bool,
-    pub kyc_required: bool,
-    pub rating: f32,
-    pub supports_fixed_rate: bool,
-    pub supports_floating_rate: bool,
+    pub kyc_rating: String,              // NEW: A, B, C, or D (Trocador's KYC rating)
+    pub insurance_percentage: Option<f64>, // NEW: Insurance coverage (e.g., 0.015 = 1.5%)
+    pub eta_minutes: Option<i32>,         // NEW: Estimated time in minutes
+    pub markup_enabled: bool,             // NEW: Whether platform can add commission
     pub api_url: Option<String>,
     pub logo_url: Option<String>,
     pub website_url: Option<String>,
+    pub last_synced_at: Option<DateTime<Utc>>, // NEW: Cache timestamp
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -32,15 +33,18 @@ pub struct Provider {
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Currency {
     pub id: i64,
-    pub symbol: String,
+    pub symbol: String,                 // Maps to "ticker" in Trocador
     pub name: String,
     pub network: String,
     pub is_active: bool,
-    pub logo_url: Option<String>,
+    pub logo_url: Option<String>,       // Maps to "image" in Trocador
     pub contract_address: Option<String>,
     pub decimals: i32,
-    pub requires_extra_id: bool,
-    pub extra_id_name: Option<String>,
+    pub requires_extra_id: bool,        // Maps to "memo" in Trocador
+    pub extra_id_name: Option<String>,  // e.g., "Destination Tag", "Memo"
+    pub min_amount: Option<f64>,        // NEW: Global minimum from Trocador
+    pub max_amount: Option<f64>,        // NEW: Global maximum from Trocador
+    pub last_synced_at: Option<DateTime<Utc>>, // NEW: Cache timestamp
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -147,8 +151,7 @@ pub struct ProviderCurrency {
     pub provider_id: String,
     pub currency_id: i64,
     pub is_active: bool,
-    pub min_amount: Option<f64>,
-    pub max_amount: Option<f64>,
+    // REMOVED: min_amount, max_amount (Trocador uses global limits)
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
