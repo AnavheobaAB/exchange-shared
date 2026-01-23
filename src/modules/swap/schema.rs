@@ -416,6 +416,25 @@ pub struct HistoryResponse {
 }
 
 // =============================================================================
+// ADDRESS VALIDATION
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct ValidateAddressRequest {
+    pub ticker: String,
+    pub network: String,
+    pub address: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ValidateAddressResponse {
+    pub valid: bool,
+    pub ticker: String,
+    pub network: String,
+    pub address: String,
+}
+
+// =============================================================================
 // ERROR RESPONSE
 // =============================================================================
 

@@ -9,7 +9,7 @@ use crate::AppState;
 use super::crud::{SwapCrud};
 use super::schema::{
     CurrenciesQuery, CurrencyResponse, ProvidersQuery, ProviderResponse, SwapErrorResponse,
-    CreateSwapRequest, CreateSwapResponse, SwapStatusResponse,
+    CreateSwapRequest, CreateSwapResponse, SwapStatusResponse, ValidateAddressRequest, ValidateAddressResponse,
 };
 use crate::services::trocador::TrocadorClient;
 use crate::modules::auth::interface::OptionalUser;
@@ -155,6 +155,28 @@ pub async fn get_swap_status(
         let status = match e {
             super::crud::SwapError::SwapNotFound => StatusCode::NOT_FOUND,
             super::crud::SwapError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            super::crud::SwapError::ExternalApiError(_) => StatusCode::BAD_GATEWAY,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, Json(SwapErrorResponse::new(e.to_string())))
+    })?;
+
+    Ok(Json(response))
+}
+
+// =============================================================================
+// POST /swap/validate-address - Validate cryptocurrency address
+// =============================================================================
+
+pub async fn validate_address(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ValidateAddressRequest>,
+) -> Result<Json<ValidateAddressResponse>, (StatusCode, Json<SwapErrorResponse>)> {
+    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()));
+
+    let response = crud.validate_address(&payload).await.map_err(|e| {
+        let status = match e {
+            super::crud::SwapError::InvalidAddress => StatusCode::BAD_REQUEST,
             super::crud::SwapError::ExternalApiError(_) => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };

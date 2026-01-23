@@ -794,6 +794,51 @@ impl SwapCrud {
     }
 
     // =========================================================================
+    // ADDRESS VALIDATION
+    // =========================================================================
+
+    /// Validate cryptocurrency address using Trocador API
+    pub async fn validate_address(
+        &self,
+        request: &super::schema::ValidateAddressRequest,
+    ) -> Result<super::schema::ValidateAddressResponse, SwapError> {
+        // 1. Validate input
+        if request.ticker.trim().is_empty() {
+            return Err(SwapError::InvalidAddress);
+        }
+
+        if request.network.trim().is_empty() {
+            return Err(SwapError::InvalidAddress);
+        }
+
+        if request.address.trim().is_empty() {
+            return Err(SwapError::InvalidAddress);
+        }
+
+        // 2. Get API key
+        let api_key = std::env::var("TROCADOR_API_KEY")
+            .map_err(|_| SwapError::ExternalApiError("TROCADOR_API_KEY not set".to_string()))?;
+
+        let trocador_client = TrocadorClient::new(api_key);
+
+        // 3. Call Trocador API with retry logic
+        let is_valid = self.call_trocador_with_retry(|| async {
+            trocador_client
+                .validate_address(&request.ticker, &request.network, &request.address)
+                .await
+        })
+        .await?;
+
+        // 4. Return response
+        Ok(super::schema::ValidateAddressResponse {
+            valid: is_valid,
+            ticker: request.ticker.clone(),
+            network: request.network.clone(),
+            address: request.address.clone(),
+        })
+    }
+
+    // =========================================================================
     // RETRY LOGIC FOR RATE LIMITING
     // =========================================================================
 

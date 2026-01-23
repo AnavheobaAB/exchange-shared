@@ -235,4 +235,50 @@ impl TrocadorClient {
 
         Ok(trade_response)
     }
+
+    /// Validate address for a specific coin and network
+    pub async fn validate_address(
+        &self,
+        ticker: &str,
+        network: &str,
+        address: &str,
+    ) -> Result<bool, TrocadorError> {
+        let url = format!("{}/validateaddress", self.base_url);
+        
+        let params = [
+            ("ticker", ticker.to_string()),
+            ("network", network.to_string()),
+            ("address", address.to_string()),
+        ];
+
+        let response = self
+            .client
+            .get(&url)
+            .header("API-Key", &self.api_key)
+            .query(&params)
+            .send()
+            .await
+            .map_err(|e| TrocadorError::HttpError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(TrocadorError::ApiError(format!(
+                "API returned error: {}",
+                error_text
+            )));
+        }
+
+        // Parse response: {"result": true} or {"result": false}
+        let response_json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| TrocadorError::ParseError(e.to_string()))?;
+
+        let is_valid = response_json
+            .get("result")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        Ok(is_valid)
+    }
 }
