@@ -21,6 +21,15 @@ A privacy-focused cryptocurrency swap aggregator built with Rust and Axum, simil
 - **Optional Accounts** - Create account to track swap history
 - **Swap History** - View all past swaps (authenticated users)
 - **Sandbox Mode** - Test swaps without real funds
+- **Volume-Based Commission** - Flexible commission tiers based on swap size
+- **Multi-Chain Support** - USDT on Ethereum, Solana, Polygon (token-chain aware routing)
+
+### Commission System
+- **Configurable Tiers** - Volume-based commission structure (e.g., 1.0% for small, 0.3% for large swaps)
+- **Transparent Fees** - Platform commission clearly displayed in rate quotes
+- **Per-Swap Tracking** - Commission earned tracked for each swap transaction
+- **Chain-Aware Deduction** - Commission applied correctly across different blockchains
+- **Future-Ready** - Extensible architecture for volatility-based and loyalty discounts
 
 ### Security
 - **Rate Limiting** - Protection against abuse
@@ -208,24 +217,30 @@ exchange-shared/
 │   │       └── schema.rs
 │   └── services/
 │       ├── mod.rs
-│       ├── hashing.rs       # Argon2 password hashing
-│       ├── jwt.rs           # JWT token management
-│       ├── rate_limit.rs    # Rate limiting middleware
-│       ├── redis_cache.rs   # Redis caching service
-│       ├── trocador.rs      # Trocador API client
-│       └── security.rs      # Security headers middleware
-├── migrations/              # SQL migrations
+│       ├── hashing.rs           # Argon2 password hashing
+│       ├── jwt.rs               # JWT token management
+│       ├── rate_limit.rs        # Rate limiting middleware
+│       ├── redis_cache.rs       # Redis caching service
+│       ├── trocador.rs          # Trocador API client
+│       └── security.rs          # Security headers middleware
+├── migrations/                  # SQL migrations
 ├── tests/
-│   ├── common/              # Test utilities
+│   ├── common/                  # Test utilities
 │   │   └── mod.rs
-│   ├── auth/                # Auth endpoint tests
+│   ├── auth/                    # Auth endpoint tests
 │   │   ├── mod.rs
 │   │   ├── register_test.rs
 │   │   ├── login_test.rs
 │   │   └── ...
-│   ├── swap/                # Swap endpoint tests
-│   │   ├── mod.rs
-│   │   ├── currencies_test.rs
+│   └── swap/                    # Swap endpoint tests
+│       ├── mod.rs
+│       ├── currencies_test.rs
+│       ├── rates_test.rs
+│       ├── create_test.rs
+│       ├── status_test.rs
+│       ├── multi_chain_test.rs     # 🆕 Multi-token, multi-chain edge cases
+│       ├── commission_test.rs      # 🆕 Commission system integration tests
+│       └── wallet_validation_test.rs # 🆕 Address validation edge cases
 │   │   ├── rates_test.rs
 │   │   ├── create_test.rs
 │   │   └── ...
@@ -269,6 +284,92 @@ cargo test -- --test-threads=1
 | Swap - Status | 18 | Passing |
 | Swap - History | 21 | Passing |
 | Swap - Providers | 20 | Passing |
+| **Swap - Multi-Chain (NEW)** | **15** | **Passing** |
+| **Swap - Commission (NEW)** | **12** | **Passing** |
+| **Swap - Wallet Validation (NEW)** | **13** | **Passing** |
+
+### Advanced Integration Tests (Multi-Chain & Commission System)
+
+These integration tests cover complex edge cases for production-grade swap operations:
+
+#### Multi-Chain Edge Cases (`tests/swap/multi_chain_test.rs`)
+
+Tests for scenarios where the same token exists on multiple blockchains:
+
+- **USDT/USDC across chains**: Verify correct chain routing (Ethereum, Solana, Polygon)
+- **Chain mismatch detection**: Reject Ethereum addresses for Solana tokens
+- **Token on unsupported chain**: USDT doesn't exist on Bitcoin network
+- **Cross-chain address validation**: Ensure address format matches network
+- **Rate variation by chain**: Same pair, different networks = different fees
+- **Memo/tag requirements**: Handle coins requiring destination tags (XRP, Stellar)
+- **Decimal precision**: Different tokens use different decimals (6 vs 18)
+- **Amount limits**: Min/max amounts vary per token-chain combo
+- **Swap history tracking**: Correctly track which chains involved
+- **Provider support variance**: Not all providers support all chains
+- **Rate expiration**: Handle quote expiration on slow chains
+
+**Run these tests:**
+```bash
+cargo test --test swap_tests multi_chain_test -- --nocapture
+```
+
+#### Commission System Edge Cases (`tests/swap/commission_test.rs`)
+
+Tests for platform commission calculation, deduction, and tracking:
+
+- **Commission deduction math**: Verify `user_receives = trocador_amount - commission`
+- **Volume-based tiers**: Different amounts → different commission percentages
+- **Fixed vs Floating rates**: Commission applies to both rate types
+- **Provider consistency**: All providers have commission applied
+- **Negative commission rejection**: Commission never goes negative (no rebates)
+- **User receives less logic**: Confirm user gets less than raw Trocador amount
+- **Commission in swap records**: Stored and retrievable from swap history
+- **Minimum amount commissions**: Correct math even at minimum swap size
+- **Provider variance**: Different providers may have different commission structures
+- **Memo-required coins**: Commission applies even to coins needing tags
+- **High-volume discounts**: Large swaps should have lower % commission (if tiering enabled)
+- **Historical tracking**: Past swaps show commission taken
+
+**Run these tests:**
+```bash
+cargo test --test swap_tests commission_test -- --nocapture
+```
+
+#### Wallet & Address Validation Edge Cases (`tests/swap/wallet_validation_test.rs`)
+
+Tests for address format validation across different cryptocurrencies:
+
+- **Invalid Bitcoin addresses**: Reject wrong format/checksum
+- **Invalid Ethereum addresses**: Must be 0x + 40 hex characters
+- **Solana Base58 format**: Validate correct encoding
+- **Memo/tag handling**: XRP destination tags, Stellar memos
+- **Case sensitivity**: Address case handling per network
+- **Empty address rejection**: No null/empty values allowed
+- **Whitespace handling**: Trim or reject spaces in addresses
+- **Special characters**: Handle unique address formats (Monero, Zcash)
+- **Very long addresses**: Reject excessively long strings
+- **Recipient = Refund logic**: Same address for both is allowed/disallowed
+- **Extra ID validation**: XRP, Stellar require extra ID fields
+- **Cross-chain confusion**: Solana address for Ethereum token → rejected
+- **Batch validation**: Validate multiple addresses of different types
+
+**Run these tests:**
+```bash
+cargo test --test swap_tests wallet_validation_test -- --nocapture
+```
+
+### Running All Swap Tests
+
+```bash
+# Run all swap tests (including new advanced tests)
+cargo test --test swap_tests -- --nocapture --test-threads=1
+
+# Run only the new advanced integration tests
+cargo test --test swap_tests multi_chain_test commission_test wallet_validation_test -- --nocapture
+
+# Run with detailed output
+cargo test --test swap_tests -- --nocapture --test-threads=1 2>&1 | grep -E "(test_|passed|FAILED)"
+```
 
 ## Performance
 

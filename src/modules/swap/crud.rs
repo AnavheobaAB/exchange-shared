@@ -1194,7 +1194,7 @@ impl SwapCrud {
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T, TrocadorError>>,
     {
-        let max_retries = 5;
+        let max_retries = 2; // Reduced from 5 to avoid long hangs
         let mut retries = 0;
 
         loop {
@@ -1211,17 +1211,18 @@ impl SwapCrud {
 
                     if is_rate_limit && retries < max_retries {
                         retries += 1;
-                        // Exponential backoff: 2s, 4s, 8s, 16s, 32s
-                        let delay_secs = 2u64.pow(retries);
+                        // Linear backoff: 500ms, 1000ms
+                        // Total max wait: ~1.5s
+                        let delay_millis = retries * 500;
                         
                         tracing::warn!(
-                            "Rate limit hit, retrying in {}s (attempt {}/{})",
-                            delay_secs,
+                            "Rate limit hit, retrying in {}ms (attempt {}/{})",
+                            delay_millis,
                             retries,
                             max_retries
                         );
                         
-                        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                        tokio::time::sleep(Duration::from_millis(delay_millis as u64)).await;
                         continue;
                     }
 

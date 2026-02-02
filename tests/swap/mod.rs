@@ -6,3 +6,10 @@ pub mod create_test;
 pub mod status_test;
 pub mod history_test;
 pub mod providers_test;
+pub mod validate_address_test;
+
+// New integration test modules for advanced edge cases
+pub mod multi_chain_test;
+pub mod commission_test;
+pub mod wallet_validation_test;
+
