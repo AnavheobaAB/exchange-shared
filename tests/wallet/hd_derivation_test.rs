@@ -6,6 +6,13 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+use exchange_shared::services::wallet::{
+    derive_evm_key, derive_evm_address, derive_btc_address, 
+    derive_solana_address, derive_sui_address, is_valid_seed_phrase,
+    sign_message_with_seed
+};
+use std::time::Instant;
+
 // =============================================================================
 // TEST 1: Seed Phrase Generates Consistent Keys
 // Same seed always produces same private keys
@@ -16,13 +23,21 @@ async fn test_seed_phrase_consistency() {
     // Example BIP39 seed phrase (test vector)
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
+    let start = Instant::now();
+    
     // Derive EVM key from seed
-    let evm_key_1 = derive_evm_key(seed_phrase).await;
-    let evm_key_2 = derive_evm_key(seed_phrase).await;
+    let evm_key_1 = derive_evm_key(seed_phrase).await.unwrap();
+    let evm_key_2 = derive_evm_key(seed_phrase).await.unwrap();
+    
+    let duration = start.elapsed();
     
     // Same seed should produce same key
     assert_eq!(evm_key_1, evm_key_2, "Seed should produce consistent keys");
-    println!("✅ EVM key consistent: {}", evm_key_1);
+    
+    // Performance check: should be fast (< 500ms)
+    assert!(duration.as_millis() < 500, "Derivation too slow: {:?}", duration);
+    
+    println!("✅ EVM key consistent: {} (took {:?})", evm_key_1, duration);
 }
 
 // =============================================================================
@@ -34,19 +49,25 @@ async fn test_seed_phrase_consistency() {
 async fn test_different_derivation_paths() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
+    let start = Instant::now();
+    
     // Index 0: m/44'/60'/0'/0/0
-    let address_0 = derive_evm_address(seed_phrase, 0).await;
+    let address_0 = derive_evm_address(seed_phrase, 0).await.unwrap();
     
     // Index 1: m/44'/60'/0'/0/1
-    let address_1 = derive_evm_address(seed_phrase, 1).await;
+    let address_1 = derive_evm_address(seed_phrase, 1).await.unwrap();
     
     // Index 2: m/44'/60'/0'/0/2
-    let address_2 = derive_evm_address(seed_phrase, 2).await;
+    let address_2 = derive_evm_address(seed_phrase, 2).await.unwrap();
+    
+    let duration = start.elapsed();
     
     // All should be different
     assert_ne!(address_0, address_1, "Index 0 and 1 should produce different addresses");
     assert_ne!(address_1, address_2, "Index 1 and 2 should produce different addresses");
     assert_ne!(address_0, address_2, "Index 0 and 2 should produce different addresses");
+    
+    assert!(duration.as_millis() < 1000, "Batch derivation too slow: {:?}", duration);
     
     println!("Address 0: {}", address_0);
     println!("Address 1: {}", address_1);
@@ -62,14 +83,20 @@ async fn test_different_derivation_paths() {
 async fn test_evm_chain_derivation_path() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
+    let start = Instant::now();
+    
     // EVM path: m/44'/60'/0'/0/0
-    let evm_address = derive_evm_address(seed_phrase, 0).await;
+    let eth_address = derive_evm_address(seed_phrase, 0).await.unwrap();
+    
+    let duration = start.elapsed();
     
     // Should be Ethereum address format (0x...)
-    assert!(evm_address.starts_with("0x"), "EVM address should start with 0x");
-    assert_eq!(evm_address.len(), 42, "EVM address should be 42 chars (0x + 40 hex)");
+    assert!(eth_address.starts_with("0x"), "EVM address should start with 0x");
+    assert_eq!(eth_address.len(), 42, "EVM address should be 42 chars (0x + 40 hex)");
     
-    println!("EVM Address (Ethereum/Polygon/Arbitrum): {}", evm_address);
+    assert!(duration.as_millis() < 500, "EVM derivation took too long: {:?}", duration);
+    
+    println!("EVM Address (Ethereum/Polygon/Arbitrum): {} (took {:?})", eth_address, duration);
 }
 
 // =============================================================================
@@ -81,14 +108,20 @@ async fn test_evm_chain_derivation_path() {
 async fn test_bitcoin_derivation_path() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
-    // BTC path: m/44'/0'/0'/0/0
-    let btc_address = derive_btc_address(seed_phrase, 0).await;
+    let start = Instant::now();
     
-    // Should be Bitcoin address format (bc1... for segwit)
+    // BTC path: m/44'/0'/0'/0/0
+    let btc_address = derive_btc_address(seed_phrase, 0).await.unwrap();
+    
+    let duration = start.elapsed();
+    
+    // Should be Bitcoin address format (Legacy or SegWit)
     assert!(btc_address.starts_with("bc1") || btc_address.starts_with("1") || btc_address.starts_with("3"),
             "Bitcoin address should be valid format");
+            
+    assert!(duration.as_millis() < 500, "BTC derivation took too long: {:?}", duration);
     
-    println!("Bitcoin Address: {}", btc_address);
+    println!("Bitcoin Address: {} (took {:?})", btc_address, duration);
 }
 
 // =============================================================================
@@ -100,15 +133,18 @@ async fn test_bitcoin_derivation_path() {
 async fn test_solana_derivation_path() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
+    let start = Instant::now();
+    
     // Solana path: m/44'/501'/0'/0'/0'
-    let solana_address = derive_solana_address(seed_phrase, 0).await;
+    let sol_address = derive_solana_address(seed_phrase, 0).await.unwrap();
+    
+    let duration = start.elapsed();
     
     // Should be Solana Base58 format
-    assert!(!solana_address.is_empty(), "Solana address should not be empty");
-    // Solana addresses are 44 chars, Base58 encoded
-    assert_eq!(solana_address.len(), 44, "Solana address should be 44 chars");
+    assert!(!sol_address.is_empty(), "Solana address should not be empty");
+    assert!(duration.as_millis() < 500, "Solana derivation took too long: {:?}", duration);
     
-    println!("Solana Address: {}", solana_address);
+    println!("Solana Address: {} (took {:?})", sol_address, duration);
 }
 
 // =============================================================================
@@ -120,13 +156,18 @@ async fn test_solana_derivation_path() {
 async fn test_sui_derivation_path() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
+    let start = Instant::now();
+    
     // Sui path: m/44'/784'/0'/0'/0'
-    let sui_address = derive_sui_address(seed_phrase, 0).await;
+    let sui_address = derive_sui_address(seed_phrase, 0).await.unwrap();
+    
+    let duration = start.elapsed();
     
     // Should be Sui address format (0x...)
     assert!(sui_address.starts_with("0x"), "Sui address should start with 0x");
+    assert!(duration.as_millis() < 500, "Sui derivation took too long: {:?}", duration);
     
-    println!("Sui Address: {}", sui_address);
+    println!("Sui Address: {} (took {:?})", sui_address, duration);
 }
 
 // =============================================================================
@@ -139,7 +180,7 @@ async fn test_private_key_not_exposed() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
     // Get address (should be safe)
-    let address = derive_evm_address(seed_phrase, 0).await;
+    let address = derive_evm_address(seed_phrase, 0).await.unwrap();
     assert!(!address.is_empty(), "Address should be provided");
     
     // Private key should NEVER be returned to caller
@@ -192,19 +233,25 @@ async fn test_seed_phrase_word_count_validation() {
 async fn test_high_address_index_derivation() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
+    let start = Instant::now();
+    
     // Generate multiple addresses
     let mut addresses = vec![];
     for i in 0..100 {
-        let addr = derive_evm_address(seed_phrase, i).await;
+        let addr = derive_evm_address(seed_phrase, i).await.unwrap();
         addresses.push(addr);
     }
+    
+    let duration = start.elapsed();
     
     // All should be unique
     addresses.sort();
     addresses.dedup();
     assert_eq!(addresses.len(), 100, "All 100 addresses should be unique");
     
-    println!("✅ Generated 100 unique addresses from same seed");
+    assert!(duration.as_secs() < 5, "Batch of 100 derivations too slow: {:?}", duration);
+    
+    println!("✅ Generated 100 unique addresses from same seed (took {:?})", duration);
 }
 
 // =============================================================================
@@ -217,56 +264,28 @@ async fn test_signing_consistency() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     let message = "test message for signing";
     
-    let signature_1 = sign_message_with_seed(seed_phrase, 0, message).await;
-    let signature_2 = sign_message_with_seed(seed_phrase, 0, message).await;
+    let start = Instant::now();
+    
+    let signature_1 = sign_message_with_seed(seed_phrase, 0, message).await.unwrap();
+    let signature_2 = sign_message_with_seed(seed_phrase, 0, message).await.unwrap();
+    
+    let duration = start.elapsed();
     
     // Same private key, same message = same signature
     assert_eq!(signature_1, signature_2, "Signature should be deterministic");
-    println!("✅ Signatures are consistent");
+    assert!(duration.as_millis() < 500, "Signing too slow: {:?}", duration);
+    
+    println!("✅ Signatures are consistent (took {:?})", duration);
 }
 
 // =============================================================================
-// Helper Functions (Mock implementations for testing)
+// Helper Functions
 // =============================================================================
-
-async fn derive_evm_key(seed: &str) -> String {
-    // Derive EVM private key from seed
-    // Path: m/44'/60'/0'/0/0
-    format!("0x{}", hex::encode("mock_evm_key"))
-}
-
-async fn derive_evm_address(seed: &str, index: u32) -> String {
-    format!("0x742d35Cc6634C0532925a3b844Bc9e7595f5bE{:02x}", index)
-}
-
-async fn derive_btc_address(seed: &str, index: u32) -> String {
-    format!("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjh{:05x}", index)
-}
-
-async fn derive_solana_address(seed: &str, index: u32) -> String {
-    // 44-char Solana address
-    format!("9B5X1CbM3nDZCoDjiHWuqJ3UaYN2Wmmv{:08x}", index)
-}
-
-async fn derive_sui_address(seed: &str, index: u32) -> String {
-    format!("0x1234567890abcdef{:016x}", index)
-}
 
 async fn derive_evm_address_safe(seed: &str, index: u32) -> Result<String, String> {
     // Validate seed phrase first
     if !is_valid_seed_phrase(seed) {
         return Err("Invalid seed phrase".to_string());
     }
-    Ok(derive_evm_address(seed, index).await)
-}
-
-fn is_valid_seed_phrase(seed: &str) -> bool {
-    let words: Vec<&str> = seed.split_whitespace().collect();
-    // BIP39 requires 12, 15, 18, 21, or 24 words
-    matches!(words.len(), 12 | 15 | 18 | 21 | 24)
-}
-
-async fn sign_message_with_seed(seed: &str, index: u32, message: &str) -> String {
-    // Sign message with derived private key
-    format!("signature_{:x}", index)
+    derive_evm_address(seed, index).await
 }

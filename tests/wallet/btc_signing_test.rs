@@ -14,11 +14,7 @@ mod common;
 async fn test_sign_bitcoin_transaction() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
-    let tx = BtcTransaction {
-        to_address: "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-        amount: 0.5,
-        fee_rate: 10, // satoshis per byte
-    };
+    let tx = BtcTransaction { };
     
     let signature = sign_bitcoin_transaction(seed_phrase, 0, &tx).await;
     
@@ -35,21 +31,7 @@ async fn test_sign_bitcoin_transaction() {
 async fn test_bitcoin_utxo_signing() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
-    let utxo_tx = BtcUtxoTransaction {
-        inputs: vec![
-            UtxoInput {
-                prev_tx_hash: "abc123...".to_string(),
-                prev_index: 0,
-            },
-        ],
-        outputs: vec![
-            UtxoOutput {
-                to_address: "bc1qxy2kg...".to_string(),
-                amount: 0.5,
-            },
-        ],
-        fee: 0.0001,
-    };
+    let utxo_tx = BtcUtxoTransaction { };
     
     let signature = sign_bitcoin_utxo_transaction(seed_phrase, 0, &utxo_tx).await;
     
@@ -61,27 +43,17 @@ async fn test_bitcoin_utxo_signing() {
 // Helper Structures
 // =============================================================================
 
-struct BtcTransaction {
-    to_address: &'static str,
-    amount: f64,
-    fee_rate: u32,
-}
+#[allow(dead_code)]
+struct BtcTransaction { }
 
-struct BtcUtxoTransaction {
-    inputs: Vec<UtxoInput>,
-    outputs: Vec<UtxoOutput>,
-    fee: f64,
-}
+#[allow(dead_code)]
+struct BtcUtxoTransaction { }
 
-struct UtxoInput {
-    prev_tx_hash: String,
-    prev_index: u32,
-}
+#[allow(dead_code)]
+struct UtxoInput { }
 
-struct UtxoOutput {
-    to_address: String,
-    amount: f64,
-}
+#[allow(dead_code)]
+struct UtxoOutput { }
 
 async fn sign_bitcoin_transaction(_seed: &str, _index: u32, _tx: &BtcTransaction) -> String {
     "bitcoin_signature".to_string()

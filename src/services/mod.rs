@@ -4,4 +4,5 @@ pub mod rate_limit;
 pub mod rate_limiter;
 pub mod redis_cache;
 pub mod security;
+pub mod wallet;
 pub mod trocador;

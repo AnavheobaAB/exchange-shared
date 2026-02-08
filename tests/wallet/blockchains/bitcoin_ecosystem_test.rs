@@ -30,10 +30,7 @@ async fn test_bitcoin_native_segwit() {
 
 #[tokio::test]
 async fn test_bitcoin_utxo_signing() {
-    let tx = BitcoinTransaction {
-        inputs: vec![UtxoInput { prev_tx: "abc".to_string(), index: 0 }],
-        outputs: vec![UtxoOutput { to: "bc1q...".to_string(), amount: 0.5 }],
-    };
+    let tx = BitcoinTransaction { };
     
     let sig = sign_bitcoin_transaction("seed", &tx).await;
     assert!(!sig.is_empty());
@@ -53,9 +50,6 @@ async fn test_brc20_inscription_data() {
     // BRC20 tokens are inscribed on Bitcoin
     let inscription = BRC20Inscription {
         p: "brc-20",
-        op: "deploy",
-        tick: "ordi",
-        max: "21000000",
     };
     
     assert_eq!(inscription.p, "brc-20");
@@ -67,7 +61,6 @@ async fn test_bitcoin_runes_support() {
     // Bitcoin Runes protocol
     let rune_tx = RuneTransaction {
         protocol: "runes",
-        symbol: "LOBO",
     };
     
     assert_eq!(rune_tx.protocol, "runes");
@@ -78,8 +71,6 @@ async fn test_bitcoin_runes_support() {
 async fn test_lightning_fast_payments() {
     // Lightning enables fast BTC transfers
     let payment = LightningPayment {
-        amount: 0.01,
-        currency: "btc",
         speed: "instant",
     };
     
@@ -144,7 +135,7 @@ async fn derive_bitcoin_taproot(seed: &str, index: u32) -> String {
     format!("bc1p{:056x}", (seed.len() as u32 + index) * 86)
 }
 
-async fn sign_bitcoin_transaction(seed: &str, tx: &BitcoinTransaction) -> String {
+async fn sign_bitcoin_transaction(_seed: &str, _tx: &BitcoinTransaction) -> String {
     "bitcoin_sig".to_string()
 }
 
@@ -160,35 +151,16 @@ async fn network_requires_memo(network: &str) -> bool {
     matches!(network, "stacks")
 }
 
-struct BitcoinTransaction {
-    inputs: Vec<UtxoInput>,
-    outputs: Vec<UtxoOutput>,
-}
-
-struct UtxoInput {
-    prev_tx: String,
-    index: u32,
-}
-
-struct UtxoOutput {
-    to: String,
-    amount: f64,
-}
+struct BitcoinTransaction { }
 
 struct BRC20Inscription {
     p: &'static str,
-    op: &'static str,
-    tick: &'static str,
-    max: &'static str,
 }
 
 struct RuneTransaction {
     protocol: &'static str,
-    symbol: &'static str,
 }
 
 struct LightningPayment {
-    amount: f64,
-    currency: &'static str,
     speed: &'static str,
 }

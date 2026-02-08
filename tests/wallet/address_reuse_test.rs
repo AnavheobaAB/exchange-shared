@@ -34,12 +34,12 @@ async fn test_address_index_rotation() {
 
 #[tokio::test]
 async fn test_prevent_address_reuse() {
-    let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let _seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
     let swaps = vec![
-        SwapRecord { swap_id: "swap1", address_index: 0 },
-        SwapRecord { swap_id: "swap2", address_index: 1 },
-        SwapRecord { swap_id: "swap3", address_index: 0 },  // REUSE!
+        SwapRecord { address_index: 0 },
+        SwapRecord { address_index: 1 },
+        SwapRecord { address_index: 0 },  // REUSE!
     ];
     
     let reuse_detected = check_for_address_reuse(&swaps);
@@ -55,20 +55,20 @@ async fn test_prevent_address_reuse() {
 
 #[tokio::test]
 async fn test_anonymity_score_calculation() {
-    let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let _seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
     // Poor anonymity: 10 swaps with same address
     let poor_swaps = vec![
-        SwapRecord { swap_id: "swap1", address_index: 0 },
-        SwapRecord { swap_id: "swap2", address_index: 0 },
-        SwapRecord { swap_id: "swap3", address_index: 0 },
+        SwapRecord { address_index: 0 },
+        SwapRecord { address_index: 0 },
+        SwapRecord { address_index: 0 },
     ];
     
     // Good anonymity: 10 swaps with different addresses
     let good_swaps = vec![
-        SwapRecord { swap_id: "swap1", address_index: 0 },
-        SwapRecord { swap_id: "swap2", address_index: 1 },
-        SwapRecord { swap_id: "swap3", address_index: 2 },
+        SwapRecord { address_index: 0 },
+        SwapRecord { address_index: 1 },
+        SwapRecord { address_index: 2 },
     ];
     
     let poor_score = calculate_anonymity_score(&poor_swaps);
@@ -83,7 +83,6 @@ async fn test_anonymity_score_calculation() {
 // =============================================================================
 
 struct SwapRecord {
-    swap_id: &'static str,
     address_index: u32,
 }
 

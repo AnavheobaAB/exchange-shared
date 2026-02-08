@@ -44,6 +44,14 @@ impl TestContext {
 
     pub async fn cleanup(&self) {
         // Clean up test data after each test
+        sqlx::query("DELETE FROM swap_address_info")
+            .execute(&self.db)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM swaps")
+            .execute(&self.db)
+            .await
+            .ok();
         sqlx::query("DELETE FROM refresh_tokens")
             .execute(&self.db)
             .await

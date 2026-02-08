@@ -14,7 +14,7 @@ async fn test_xrp_address_with_tag() {
     let tag = generate_xrp_tag().await;
     
     assert!(!addr.is_empty());
-    assert!(tag > 0 && tag < 2u32.pow(32), "XRP tag must be valid");
+    assert!(tag > 0 && tag <= u32::MAX, "XRP tag must be valid");
 }
 
 #[tokio::test]
@@ -43,9 +43,9 @@ async fn test_stellar_memo_requirement() {
 #[tokio::test]
 async fn test_stellar_memo_types() {
     // Stellar supports multiple memo types
-    let memo_text = MemoEntry { memo_type: "text", value: "order123" };
-    let memo_id = MemoEntry { memo_type: "id", value: "123456789" };
-    let memo_hash = MemoEntry { memo_type: "hash", value: "abc123..." };
+    let memo_text = MemoEntry { memo_type: "text" };
+    let memo_id = MemoEntry { memo_type: "id" };
+    let memo_hash = MemoEntry { memo_type: "hash" };
     
     assert_eq!(memo_text.memo_type, "text");
     assert_eq!(memo_id.memo_type, "id");
@@ -157,7 +157,7 @@ async fn generate_xrp_tag() -> u32 {
     12345
 }
 
-async fn validate_xrp_destination(addr: &str, tag: Option<u32>) -> ValidationResult {
+async fn validate_xrp_destination(_addr: &str, tag: Option<u32>) -> ValidationResult {
     match tag {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -171,7 +171,7 @@ async fn validate_xrp_tag(tag: u32) -> bool {
     tag <= u32::MAX
 }
 
-async fn validate_stellar_destination(addr: &str, memo: Option<String>) -> ValidationResult {
+async fn validate_stellar_destination(_addr: &str, memo: Option<String>) -> ValidationResult {
     match memo {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -181,7 +181,7 @@ async fn validate_stellar_destination(addr: &str, memo: Option<String>) -> Valid
     }
 }
 
-async fn validate_algorand_destination(addr: &str, memo: Option<String>) -> ValidationResult {
+async fn validate_algorand_destination(_addr: &str, memo: Option<String>) -> ValidationResult {
     match memo {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -191,7 +191,7 @@ async fn validate_algorand_destination(addr: &str, memo: Option<String>) -> Vali
     }
 }
 
-async fn validate_eos_destination(addr: &str, memo: Option<String>) -> ValidationResult {
+async fn validate_eos_destination(_addr: &str, memo: Option<String>) -> ValidationResult {
     match memo {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -201,7 +201,7 @@ async fn validate_eos_destination(addr: &str, memo: Option<String>) -> Validatio
     }
 }
 
-async fn validate_vechain_destination(addr: &str, memo: Option<String>) -> ValidationResult {
+async fn validate_vechain_destination(_addr: &str, memo: Option<String>) -> ValidationResult {
     match memo {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -211,7 +211,7 @@ async fn validate_vechain_destination(addr: &str, memo: Option<String>) -> Valid
     }
 }
 
-async fn validate_hedera_destination(addr: &str, memo: Option<String>) -> ValidationResult {
+async fn validate_hedera_destination(_addr: &str, memo: Option<String>) -> ValidationResult {
     match memo {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -221,7 +221,7 @@ async fn validate_hedera_destination(addr: &str, memo: Option<String>) -> Valida
     }
 }
 
-async fn validate_cosmos_destination(addr: &str, memo: Option<String>) -> ValidationResult {
+async fn validate_cosmos_destination(_addr: &str, memo: Option<String>) -> ValidationResult {
     match memo {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -231,7 +231,7 @@ async fn validate_cosmos_destination(addr: &str, memo: Option<String>) -> Valida
     }
 }
 
-async fn validate_polkadot_destination(addr: &str, memo: Option<String>) -> ValidationResult {
+async fn validate_polkadot_destination(_addr: &str, memo: Option<String>) -> ValidationResult {
     match memo {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -241,7 +241,7 @@ async fn validate_polkadot_destination(addr: &str, memo: Option<String>) -> Vali
     }
 }
 
-async fn validate_ton_destination(addr: &str, memo: Option<String>, coin: &str) -> ValidationResult {
+async fn validate_ton_destination(_addr: &str, memo: Option<String>, coin: &str) -> ValidationResult {
     match memo {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -251,7 +251,7 @@ async fn validate_ton_destination(addr: &str, memo: Option<String>, coin: &str) 
     }
 }
 
-async fn validate_aptos_destination(addr: &str, memo: Option<String>) -> ValidationResult {
+async fn validate_aptos_destination(_addr: &str, memo: Option<String>) -> ValidationResult {
     match memo {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -261,7 +261,7 @@ async fn validate_aptos_destination(addr: &str, memo: Option<String>) -> Validat
     }
 }
 
-async fn validate_sui_destination(addr: &str, memo: Option<String>) -> ValidationResult {
+async fn validate_sui_destination(_addr: &str, memo: Option<String>) -> ValidationResult {
     match memo {
         Some(_) => ValidationResult { is_valid: true, error: None },
         None => ValidationResult { 
@@ -285,7 +285,6 @@ struct ValidationResult {
 
 struct MemoEntry {
     memo_type: &'static str,
-    value: &'static str,
 }
 
 struct AptosDest {

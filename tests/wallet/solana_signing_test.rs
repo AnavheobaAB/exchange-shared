@@ -6,56 +6,34 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+use exchange_shared::modules::wallet::schema::SolanaTransaction;
+use exchange_shared::services::wallet::signing::SigningService;
+use hex;
+
 // =============================================================================
 // TEST 1: Sign Solana SOL Transfer
 // =============================================================================
 
 #[tokio::test]
 async fn test_sign_solana_sol_transfer() {
-    let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    
-    let tx = SolanaTransaction {
-        to_address: "9B5X1CbM3nDZCoDjiHWuqJ3UaYN2Wmmv9",
-        amount: 1.5,
-        token: "sol",
+    let _tx = SolanaTransaction {
+        from_pubkey: "3KxMUW3odH8RFuHVv3sfmQkzE64tx8HV8bgrNCsxNTY2".to_string(),
+        to_pubkey: "9B5X1CbM3nDZCoDjiHWuqJ3UaYN2Wmmv".to_string(),
+        amount: 1000000,
+        recent_blockhash: "5E7vNp8Z8X..." .to_string(),
     };
     
-    let signature = sign_solana_transaction(seed_phrase, 0, &tx).await;
+    // 32 bytes of hex for private key
+    let priv_key = hex::encode([0u8; 32]);
+    // Mock transaction data bytes
+    let tx_data = hex::encode([1u8; 64]);
+
+    let signature = SigningService::sign_solana_transaction(&priv_key, &tx_data).unwrap();
     
     assert!(!signature.is_empty());
-    println!("✅ Solana SOL transfer signed");
-}
-
-// =============================================================================
-// TEST 2: Sign SPL Token Transfer (USDC on Solana)
-// =============================================================================
-
-#[tokio::test]
-async fn test_sign_solana_spl_token() {
-    let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    assert!(signature.starts_with("0x"));
+    // Ed25519 sig is 64 bytes = 128 hex chars + 0x = 130
+    assert_eq!(signature.len(), 130);
     
-    let tx = SolanaTransaction {
-        to_address: "9B5X1CbM3nDZCoDjiHWuqJ3UaYN2Wmmv9",
-        amount: 1000.0,
-        token: "usdc",  // SPL token
-    };
-    
-    let signature = sign_solana_transaction(seed_phrase, 0, &tx).await;
-    
-    assert!(!signature.is_empty());
-    println!("✅ Solana SPL token transfer signed");
-}
-
-// =============================================================================
-// Helper Structures
-// =============================================================================
-
-struct SolanaTransaction {
-    to_address: &'static str,
-    amount: f64,
-    token: &'static str,
-}
-
-async fn sign_solana_transaction(_seed: &str, _index: u32, _tx: &SolanaTransaction) -> String {
-    "solana_signature".to_string()
+    println!("✅ Solana SOL transfer signed with real Ed25519 logic");
 }

@@ -7,6 +7,8 @@
 #[path = "../../common/mod.rs"]
 mod common;
 
+use exchange_shared::services::wallet::derive_evm_address;
+
 // ===== APTOS (Move VM, requires memo) =====
 #[tokio::test]
 async fn test_aptos_derivation_path() {
@@ -25,15 +27,16 @@ async fn test_aptos_requires_memo() {
 #[tokio::test]
 async fn test_aptos_signing_sha3() {
     // Aptos uses SHA3 + Ed25519, NOT Keccak256
-    let tx = AptosTransaction { to: "0x...", amount: 1.0 };
+    let tx = AptosTransaction { };
     let sig = sign_aptos_transaction("seed", &tx).await;
     assert!(!sig.is_empty());
 }
 
 #[tokio::test]
 async fn test_aptos_different_from_ethereum() {
-    let eth_addr = derive_evm_address("seed", 0).await;
-    let apt_addr = derive_aptos_address("seed", 0).await;
+    let seed = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let eth_addr = derive_evm_address(seed, 0).await.unwrap();
+    let apt_addr = derive_aptos_address(seed, 0).await;
     
     // Both start with 0x but are different accounts
     assert_ne!(eth_addr, apt_addr, "Aptos and Ethereum are different blockchains");
@@ -57,7 +60,7 @@ async fn test_sui_requires_memo() {
 #[tokio::test]
 async fn test_sui_signing_blake2b() {
     // Sui uses Blake2b + Ed25519, different from Aptos
-    let tx = SuiTransaction { to: "0x...", amount: 1.0 };
+    let tx = SuiTransaction { };
     let sig = sign_sui_transaction("seed", &tx).await;
     assert!(!sig.is_empty());
 }
@@ -202,7 +205,7 @@ async fn derive_polkadot_address(seed: &str, index: u32) -> String {
     format!("1{:059x}", (seed.len() as u32 + index) * 354)
 }
 
-async fn derive_near_address(seed: &str, index: u32) -> String {
+async fn derive_near_address(seed: &str, _index: u32) -> String {
     format!("{}.near", seed.chars().take(10).collect::<String>())
 }
 
@@ -210,7 +213,7 @@ async fn derive_cosmos_address(seed: &str, index: u32) -> String {
     format!("cosmos1{:058x}", (seed.len() as u32 + index) * 118)
 }
 
-async fn derive_algorand_address(seed: &str, index: u32) -> String {
+async fn derive_algorand_address(_seed: &str, index: u32) -> String {
     format!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HVIA{:10x}", index)
 }
 
@@ -226,11 +229,11 @@ async fn derive_zilliqa_address(seed: &str, index: u32) -> String {
     format!("zil1{:058x}", (seed.len() as u32 + index) * 313)
 }
 
-async fn sign_aptos_transaction(seed: &str, tx: &AptosTransaction) -> String {
+async fn sign_aptos_transaction(_seed: &str, _tx: &AptosTransaction) -> String {
     "aptos_sig".to_string()
 }
 
-async fn sign_sui_transaction(seed: &str, tx: &SuiTransaction) -> String {
+async fn sign_sui_transaction(_seed: &str, _tx: &SuiTransaction) -> String {
     "sui_sig".to_string()
 }
 
@@ -245,12 +248,6 @@ async fn get_network_coin_count(network: &str) -> u32 {
     }
 }
 
-struct AptosTransaction {
-    to: &'static str,
-    amount: f64,
-}
+struct AptosTransaction { }
 
-struct SuiTransaction {
-    to: &'static str,
-    amount: f64,
-}
+struct SuiTransaction { }
