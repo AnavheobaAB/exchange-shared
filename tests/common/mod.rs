@@ -7,6 +7,7 @@ use sqlx::{MySql, Pool};
 pub struct TestContext {
     pub server: TestServer,
     pub db: Pool<MySql>,
+    pub redis: RedisService,
 }
 
 #[allow(dead_code)]
@@ -21,7 +22,7 @@ impl TestContext {
             .max_connections(5)
             .connect(&database_url)
             .await
-            .expect("Failed to connect to test database");
+            .expect("Failed to connect to database");
 
         // Run migrations
         sqlx::migrate!("./migrations")
@@ -36,42 +37,29 @@ impl TestContext {
         let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
         let redis_service = RedisService::new(&redis_url);
 
-        let app = exchange_shared::create_app(db.clone(), redis_service, jwt_service).await;
+        let app = exchange_shared::create_app(db.clone(), redis_service.clone(), jwt_service).await;
         let server = TestServer::new(app).expect("Failed to create test server");
 
-        Self { server, db }
+        Self { server, db, redis: redis_service }
     }
 
     pub async fn cleanup(&self) {
-        // Clean up test data after each test
-        sqlx::query("DELETE FROM swap_address_info")
-            .execute(&self.db)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM swaps")
-            .execute(&self.db)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM refresh_tokens")
-            .execute(&self.db)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM backup_codes")
-            .execute(&self.db)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM password_resets")
-            .execute(&self.db)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM email_verifications")
-            .execute(&self.db)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM users")
-            .execute(&self.db)
-            .await
-            .ok();
+        // Clean up Redis
+        if let Ok(mut conn) = self.redis.get_client().get_multiplexed_async_connection().await {
+            let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap_or(());
+        }
+
+        /* 
+        // Clean up test data - Disabled to prevent cross-test interference
+        sqlx::query("DELETE FROM polling_states").execute(&self.db).await.ok();
+        sqlx::query("DELETE FROM swap_address_info").execute(&self.db).await.ok();
+        sqlx::query("DELETE FROM swaps").execute(&self.db).await.ok();
+        sqlx::query("DELETE FROM refresh_tokens").execute(&self.db).await.ok();
+        sqlx::query("DELETE FROM backup_codes").execute(&self.db).await.ok();
+        sqlx::query("DELETE FROM password_resets").execute(&self.db).await.ok();
+        sqlx::query("DELETE FROM email_verifications").execute(&self.db).await.ok();
+        sqlx::query("DELETE FROM users").execute(&self.db).await.ok();
+        */
     }
 }
 

@@ -6,3 +6,4 @@ pub mod redis_cache;
 pub mod security;
 pub mod wallet;
 pub mod trocador;
+pub mod monitor;

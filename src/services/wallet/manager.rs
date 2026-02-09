@@ -56,20 +56,29 @@ impl WalletManager {
         })
     }
 
-    /// Orchestrate a payout to the user
+    /// Orchestrate a payout to the user with idempotency protection
     pub async fn process_payout(
         &self,
         req: PayoutRequest,
     ) -> Result<PayoutResponse, String> {
-        // 1. Get address info for the swap
+        // 1. Get address info and check for existing payout
         let info = self.crud.get_address_info(&req.swap_id).await
             .map_err(|e: sqlx::Error| e.to_string())?
             .ok_or_else(|| "No address info found for swap".to_string())?;
 
-        // 2. Derive private key
+        // 2. IDEMPOTENCY CHECK: If already has tx_hash or status is success, return early
+        if let Some(tx_hash) = info.payout_tx_hash {
+            return Ok(PayoutResponse {
+                tx_hash,
+                amount: info.payout_amount.unwrap_or(0.0),
+                status: crate::modules::wallet::model::PayoutStatus::Success,
+            });
+        }
+
+        // 3. Derive private key
         let private_key = derivation::derive_evm_key(&self.master_seed).await?; 
 
-        // 3. Build and Sign Transaction (Mocked for now)
+        // 4. Build and Sign Transaction (Mocked for now)
         let mock_tx = crate::modules::wallet::schema::EvmTransaction {
             to_address: info.recipient_address,
             amount: info.payout_amount.unwrap_or(0.0),
@@ -81,10 +90,10 @@ impl WalletManager {
 
         let signature = SigningService::sign_evm_transaction(&private_key, &mock_tx)?;
 
-        // 4. Broadcast
+        // 5. Broadcast
         let tx_hash = format!("0x_broadcasted_{}", signature.chars().take(10).collect::<String>());
 
-        // 5. Update DB
+        // 6. Update DB with tx_hash AND status
         self.crud.mark_payout_completed(&req.swap_id, &tx_hash).await
             .map_err(|e: sqlx::Error| e.to_string())?;
 
