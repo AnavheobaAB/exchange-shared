@@ -26,7 +26,7 @@ async fn main() {
 
     let jwt_service = JwtService::new(config.jwt_secret);
 
-    let app = exchange_shared::create_app(db, redis_service, jwt_service).await;
+    let app = exchange_shared::create_app(db, redis_service, jwt_service, config.wallet_mnemonic).await;
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     tracing::info!("Server running on http://localhost:3000");

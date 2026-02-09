@@ -20,14 +20,16 @@ pub struct AppState {
     pub redis: RedisService, // Changed from redis::Client
     pub http_client: reqwest::Client,
     pub jwt_service: JwtService,
+    pub wallet_mnemonic: String,
 }
 
-pub async fn create_app(db: DbPool, redis: RedisService, jwt_service: JwtService) -> Router {
+pub async fn create_app(db: DbPool, redis: RedisService, jwt_service: JwtService, wallet_mnemonic: String) -> Router {
     let state = Arc::new(AppState {
         db,
         redis,
         http_client: reqwest::Client::new(),
         jwt_service,
+        wallet_mnemonic,
     });
 
     // Rate limit: burst of 10, then 1 per minute

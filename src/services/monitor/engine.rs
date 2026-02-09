@@ -6,15 +6,22 @@ use crate::services::wallet::manager::WalletManager;
 use crate::services::redis_cache::RedisService;
 use crate::modules::monitor::model::PollingState;
 
+use crate::services::monitor::strategy::PollingStrategy;
+
 pub struct MonitorEngine {
     db: Pool<MySql>,
     redis: RedisService,
     master_seed: String,
+    strategy: PollingStrategy,
 }
 
 impl MonitorEngine {
     pub fn new(db: Pool<MySql>, redis: RedisService, master_seed: String) -> Self {
-        Self { db, redis, master_seed }
+        // Initialize strategy with default costs:
+        // Cp = 1.0 (one poll)
+        // Cd = 0.05 (20 seconds of delay equals cost of one poll)
+        let strategy = PollingStrategy::new(1.0, 0.05);
+        Self { db, redis, master_seed, strategy }
     }
 
     /// Start the background polling loop
@@ -43,7 +50,7 @@ impl MonitorEngine {
 
         // 2. Fetch Swap Details
         let swap = sqlx::query!(
-            "SELECT provider_swap_id, status FROM swaps WHERE id = ?",
+            "SELECT provider_swap_id, status, created_at FROM swaps WHERE id = ?",
             state.swap_id
         )
         .fetch_optional(&self.db)
@@ -95,25 +102,16 @@ impl MonitorEngine {
                     .execute(&self.db).await.ok();
             }
             
-            // Adaptive interval logic
-            next_poll_secs = self.calculate_next_interval(&state);
+            // 5. OPTIMAL POLLING LOGIC
+            let elapsed = chrono::Utc::now() - swap.created_at;
+            let elapsed_secs = elapsed.num_seconds().max(0) as u64;
+            next_poll_secs = self.strategy.calculate_next_interval(elapsed_secs).as_secs();
         }
 
-        // 5. Update Monitoring State
+        // 6. Update Monitoring State
         let monitor_crud = MonitorCrud::new(self.db.clone());
         let _ = monitor_crud.update_poll_result(&state.swap_id, &final_status, next_poll_secs).await;
 
         Ok(())
-    }
-
-    pub fn calculate_next_interval(&self, state: &PollingState) -> u64 {
-        // Simple adaptive decay
-        if state.poll_count < 10 {
-            15 // First 10 polls: 15s
-        } else if state.poll_count < 50 {
-            60 // Next 40 polls: 1m
-        } else {
-            300 // Thereafter: 5m
-        }
     }
 }

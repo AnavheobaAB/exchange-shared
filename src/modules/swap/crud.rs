@@ -67,11 +67,12 @@ impl From<TrocadorError> for SwapError {
 pub struct SwapCrud {
     pool: Pool<MySql>,
     redis_service: Option<RedisService>, // Changed to RedisService
+    wallet_mnemonic: Option<String>,
 }
 
 impl SwapCrud {
-    pub fn new(pool: Pool<MySql>, redis_service: Option<RedisService>) -> Self {
-        Self { pool, redis_service }
+    pub fn new(pool: Pool<MySql>, redis_service: Option<RedisService>, wallet_mnemonic: Option<String>) -> Self {
+        Self { pool, redis_service, wallet_mnemonic }
     }
 
     // =========================================================================
@@ -312,6 +313,7 @@ impl SwapCrud {
             if let Some(redis) = &self.redis_service {
                 let redis = redis.clone();
                 let pool = self.pool.clone();
+                let wallet_mnemonic = self.wallet_mnemonic.clone();
                 
                 tokio::spawn(async move {
                     if let Ok(true) = redis.try_lock("lock:sync_currencies", 60).await {
@@ -319,7 +321,7 @@ impl SwapCrud {
                         let api_key = std::env::var("TROCADOR_API_KEY").unwrap_or_default();
                         if !api_key.is_empty() {
                             let client = TrocadorClient::new(api_key);
-                            let bg_crud = SwapCrud::new(pool, Some(redis.clone()));
+                            let bg_crud = SwapCrud::new(pool, Some(redis.clone()), wallet_mnemonic);
                             
                             match bg_crud.sync_currencies_from_trocador(&client).await {
                                 Ok(count) => {
@@ -427,6 +429,7 @@ impl SwapCrud {
             if let Some(redis) = &self.redis_service {
                 let redis = redis.clone();
                 let pool = self.pool.clone();
+                let wallet_mnemonic = self.wallet_mnemonic.clone();
                 
                 tokio::spawn(async move {
                     if let Ok(true) = redis.try_lock("lock:sync_providers", 60).await {
@@ -434,7 +437,7 @@ impl SwapCrud {
                         let api_key = std::env::var("TROCADOR_API_KEY").unwrap_or_default();
                         if !api_key.is_empty() {
                             let client = TrocadorClient::new(api_key);
-                            let bg_crud = SwapCrud::new(pool, Some(redis.clone()));
+                            let bg_crud = SwapCrud::new(pool, Some(redis.clone()), wallet_mnemonic);
                             
                             match bg_crud.sync_providers_from_trocador(&client).await {
                                 Ok(count) => {
@@ -765,18 +768,23 @@ impl SwapCrud {
             .map(|quote| {
                 let amount_to = quote.amount_to.parse::<f64>().unwrap_or(0.0);
                 let waste = quote.waste.as_deref().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
-                let total_fee = waste;
+                
+                // MIDDLEMAN FLOW: Apply 1% platform commission
+                let platform_commission_rate = 0.01;
+                let platform_fee = amount_to * platform_commission_rate;
+                let final_user_receive = amount_to - platform_fee;
+                let total_fee = waste + platform_fee;
                 
                 super::schema::RateResponse {
                     provider: quote.provider.clone(),
                     provider_name: quote.provider.clone(),
-                    rate: amount_to / query.amount,
-                    estimated_amount: amount_to,
+                    rate: final_user_receive / query.amount,
+                    estimated_amount: final_user_receive,
                     min_amount: quote.min_amount.unwrap_or(0.0),
                     max_amount: quote.max_amount.unwrap_or(0.0),
                     network_fee: 0.0,
-                    provider_fee: total_fee,
-                    platform_fee: 0.0, 
+                    provider_fee: waste,
+                    platform_fee,
                     total_fee,
                     rate_type: query.rate_type.clone().unwrap_or(super::schema::RateType::Floating),
                     kyc_required: quote.kycrating.as_deref().unwrap_or("D") != "A",
@@ -817,12 +825,30 @@ impl SwapCrud {
             .map_err(|_| SwapError::ExternalApiError("TROCADOR_API_KEY not set".to_string()))?;
 
         let trocador_client = TrocadorClient::new(api_key);
+        let swap_id = uuid::Uuid::new_v4().to_string();
 
-        // 1. Call Trocador API with retry logic
+        // MIDDLEMAN FLOW: 1. Generate our internal payout address (needed for Trocador call)
+        let (internal_payout_address, address_index) = if let Some(mnemonic) = &self.wallet_mnemonic {
+            let wallet_crud = crate::modules::wallet::crud::WalletCrud::new(self.pool.clone());
+            
+            // Get index FIRST
+            let index = wallet_crud.get_next_index().await
+                .map_err(|e| SwapError::DatabaseError(format!("Wallet error: {}", e)))?;
+
+            let addr = crate::services::wallet::derivation::derive_address(mnemonic, &request.to, &request.network_to, index).await
+                .map_err(|e| SwapError::DatabaseError(format!("Derivation error: {}", e)))?;
+            
+            tracing::info!("Generated internal payout address for {}: {}", request.to, addr);
+            (addr, index)
+        } else {
+            return Err(SwapError::DatabaseError("Wallet mnemonic not configured".to_string()));
+        };
+
+        // 2. Call Trocador API with OUR address as the recipient
         let fixed = matches!(request.rate_type, super::schema::RateType::Fixed);
 
         let trocador_res = self.call_trocador_with_retry(|| async {
-            trocador_client
+            let res = trocador_client
                 .create_trade(
                     request.trade_id.as_deref(),
                     &request.from,
@@ -830,16 +856,26 @@ impl SwapCrud {
                     &request.to,
                     &request.network_to,
                     request.amount,
-                    &request.recipient_address,
+                    &internal_payout_address, // WE ARE THE RECIPIENT
                     request.refund_address.as_deref(),
                     &request.provider,
                     fixed,
                 )
-                .await
+                .await;
+            
+            if let Err(ref e) = res {
+                tracing::error!("Trocador create_trade failed: {}", e);
+            }
+            res
         })
         .await?;
 
-        // 2. Map Trocador status to our internal SwapStatus
+        // 3. Apply platform commission (1%)
+        let commission_rate = 0.01;
+        let platform_fee = trocador_res.amount_to * commission_rate;
+        let estimated_user_receive = trocador_res.amount_to - platform_fee;
+
+        // 4. Map Trocador status to our internal SwapStatus
         let status = match trocador_res.status.as_str() {
             "new" | "waiting" => super::schema::SwapStatus::Waiting,
             "confirming" => super::schema::SwapStatus::Confirming,
@@ -851,9 +887,7 @@ impl SwapCrud {
             _ => super::schema::SwapStatus::Waiting,
         };
 
-        // 3. Generate local ID and save to database
-        let swap_id = uuid::Uuid::new_v4().to_string();
-        
+        // 5. Save to database - SWAPS table FIRST
         sqlx::query(
             r#"
             INSERT INTO swaps (
@@ -863,10 +897,11 @@ impl SwapCrud {
                 deposit_address, deposit_extra_id,
                 recipient_address, recipient_extra_id,
                 refund_address, refund_extra_id,
+                platform_fee, total_fee,
                 status, rate_type, is_sandbox,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
             "#
         )
         .bind(&swap_id)
@@ -878,14 +913,16 @@ impl SwapCrud {
         .bind(&request.to)
         .bind(&request.network_to)
         .bind(request.amount)
-        .bind(trocador_res.amount_to)
-        .bind(trocador_res.amount_to / request.amount) // rate
+        .bind(estimated_user_receive)
+        .bind(estimated_user_receive / request.amount) // rate
         .bind(&trocador_res.address_provider)
         .bind(&trocador_res.address_provider_memo)
-        .bind(&request.recipient_address)
+        .bind(&request.recipient_address) // User's real address
         .bind(&request.recipient_extra_id)
         .bind(&request.refund_address)
         .bind(&request.refund_extra_id)
+        .bind(platform_fee)
+        .bind(platform_fee) // For now total platform fee is just our commission
         .bind(status.clone())
         .bind(&request.rate_type)
         .bind(request.sandbox)
@@ -893,7 +930,19 @@ impl SwapCrud {
         .await
         .map_err(|e| SwapError::DatabaseError(e.to_string()))?;
 
-        // 4. Transform to response
+        // 6. Save to swap_address_info - SECOND (Foreign Key now satisfied)
+        let wallet_crud = crate::modules::wallet::crud::WalletCrud::new(self.pool.clone());
+        wallet_crud.save_address_info(
+            &swap_id,
+            &internal_payout_address,
+            address_index,
+            &request.network_to,
+            &request.recipient_address,
+            request.recipient_extra_id.as_deref(),
+        ).await
+        .map_err(|e| SwapError::DatabaseError(format!("Failed to save address info: {}", e)))?;
+
+        // 7. Transform to response
         Ok(super::schema::CreateSwapResponse {
             swap_id,
             provider: trocador_res.provider,
@@ -902,13 +951,13 @@ impl SwapCrud {
             deposit_address: trocador_res.address_provider,
             deposit_extra_id: trocador_res.address_provider_memo,
             deposit_amount: request.amount,
-            recipient_address: request.recipient_address.clone(),
-            estimated_receive: trocador_res.amount_to,
-            rate: trocador_res.amount_to / request.amount,
+            recipient_address: request.recipient_address.clone(), // User sees THEIR address
+            estimated_receive: estimated_user_receive,
+            rate: estimated_user_receive / request.amount,
             status,
             rate_type: request.rate_type.clone(),
             is_sandbox: request.sandbox,
-            expires_at: Utc::now() + chrono::Duration::minutes(60), // Default expiry if not provided
+            expires_at: Utc::now() + chrono::Duration::minutes(60),
             created_at: Utc::now(),
         })
     }

@@ -6,4 +6,5 @@ mod swap {
     pub mod create_test;
     pub mod status_test;
     pub mod validate_address_test;
+    pub mod middleman_flow_test;
 }

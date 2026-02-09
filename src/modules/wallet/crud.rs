@@ -1,6 +1,7 @@
 use sqlx::{MySql, Pool};
 use crate::modules::wallet::model::SwapAddressInfo;
 
+#[derive(Clone)]
 pub struct WalletCrud {
     pool: Pool<MySql>,
 }
@@ -28,19 +29,13 @@ impl WalletCrud {
         our_address: &str,
         address_index: u32,
         network: &str,
+        user_recipient_address: &str,
+        user_recipient_extra_id: Option<&str>,
     ) -> Result<(), sqlx::Error> {
-        // Fetch original recipient from swaps table to keep it consistent
-        let swap = sqlx::query!(
-            "SELECT recipient_address, recipient_extra_id FROM swaps WHERE id = ?",
-            swap_id
-        )
-        .fetch_one(&self.pool)
-        .await?;
-
         let coin_type = match network.to_lowercase().as_str() {
             "bitcoin" => 0,
-            "ethereum" | "polygon" | "bsc" | "arbitrum" => 60,
-            "solana" => 501,
+            "ethereum" | "polygon" | "bsc" | "arbitrum" | "optimism" | "erc20" | "bep20" => 60,
+            "solana" | "sol" => 501,
             _ => 60,
         };
 
@@ -58,8 +53,8 @@ impl WalletCrud {
         .bind(address_index)
         .bind(1) // Default blockchain_id for now
         .bind(coin_type)
-        .bind(swap.recipient_address)
-        .bind(swap.recipient_extra_id)
+        .bind(user_recipient_address)
+        .bind(user_recipient_extra_id)
         .execute(&self.pool)
         .await?;
 

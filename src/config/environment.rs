@@ -7,6 +7,7 @@ pub struct Config {
     pub redis_url: String,
     pub jwt_secret: String,
     pub trocador_api_key: String,
+    pub wallet_mnemonic: String,
 }
 
 impl Config {
@@ -24,11 +25,15 @@ impl Config {
         let trocador_api_key = env::var("TROCADOR_API_KEY")
             .map_err(|_| "TROCADOR_API_KEY must be set".to_string())?;
 
+        let wallet_mnemonic = env::var("WALLET_MNEMONIC")
+            .map_err(|_| "WALLET_MNEMONIC must be set".to_string())?;
+
         Ok(Self {
             database_url,
             redis_url,
             jwt_secret,
             trocador_api_key,
+            wallet_mnemonic,
         })
     }
 

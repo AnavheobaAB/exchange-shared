@@ -31,22 +31,18 @@ impl WalletManager {
         let index = self.crud.get_next_index().await
             .map_err(|e: sqlx::Error| format!("DB Error: {}", e))?;
 
-        // 3. Derive address based on chain/network
-        let address = match req.network.to_lowercase().as_str() {
-            "ethereum" | "polygon" | "bsc" | "arbitrum" | "optimism" => {
-                derivation::derive_evm_address(&self.master_seed, index).await?
-            }
-            "bitcoin" => {
-                derivation::derive_btc_address(&self.master_seed, index).await?
-            }
-            "solana" => {
-                derivation::derive_solana_address(&self.master_seed, index).await?
-            }
-            _ => return Err(format!("Unsupported network: {}", req.network)),
-        };
+        // 3. Use high-level dispatcher to derive address
+        let address = derivation::derive_address(&self.master_seed, &req.ticker, &req.network, index).await?;
 
         // 4. Save to DB
-        self.crud.save_address_info(&req.swap_id, &address, index, &req.network).await
+        self.crud.save_address_info(
+            &req.swap_id,
+            &address,
+            index,
+            &req.network,
+            &req.user_recipient_address,
+            req.user_recipient_extra_id.as_deref(),
+        ).await
             .map_err(|e: sqlx::Error| format!("Failed to save address info: {}", e))?;
 
         Ok(WalletAddressResponse {

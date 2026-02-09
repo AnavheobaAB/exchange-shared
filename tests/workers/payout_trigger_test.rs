@@ -34,6 +34,8 @@ async fn test_finished_status_triggers_bridge_payout() {
         swap_id: swap_id.clone(),
         ticker: "ETH".to_string(),
         network: "ethereum".to_string(),
+        user_recipient_address: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
+        user_recipient_extra_id: None,
     }).await.unwrap();
 
     // 3. Setup: Initialize Monitor Engine

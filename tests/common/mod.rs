@@ -37,7 +37,10 @@ impl TestContext {
         let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
         let redis_service = RedisService::new(&redis_url);
 
-        let app = exchange_shared::create_app(db.clone(), redis_service.clone(), jwt_service).await;
+        let wallet_mnemonic = std::env::var("WALLET_MNEMONIC")
+            .unwrap_or_else(|_| "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string());
+
+        let app = exchange_shared::create_app(db.clone(), redis_service.clone(), jwt_service, wallet_mnemonic).await;
         let server = TestServer::new(app).expect("Failed to create test server");
 
         Self { server, db, redis: redis_service }

@@ -25,7 +25,7 @@ pub async fn create_swap(
     user: OptionalUser,
     Json(payload): Json<CreateSwapRequest>,
 ) -> Result<(StatusCode, Json<CreateSwapResponse>), (StatusCode, Json<SwapErrorResponse>)> {
-    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()));
+    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()), Some(state.wallet_mnemonic.clone()));
 
     let response = crud.create_swap(&payload, user.0.map(|u| u.id)).await.map_err(|e| {
         let status = match e {
@@ -43,7 +43,7 @@ pub async fn get_currencies(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CurrenciesQuery>,
 ) -> Result<Response, (StatusCode, Json<SwapErrorResponse>)> {
-    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()));
+    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()), Some(state.wallet_mnemonic.clone()));
 
     // The CRUD layer now handles caching, pagination, raw JSON, and background synchronization
     let result = crud.get_currencies_optimized(query).await.map_err(|e| {
@@ -82,7 +82,7 @@ pub async fn get_providers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ProvidersQuery>,
 ) -> Result<Response, (StatusCode, Json<SwapErrorResponse>)> {
-    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()));
+    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()), Some(state.wallet_mnemonic.clone()));
 
     // The CRUD layer now handles caching, optimized filtering, and background synchronization
     let result = crud.get_providers_optimized(query).await.map_err(|e| {
@@ -121,7 +121,7 @@ pub async fn get_rates(
     State(state): State<Arc<AppState>>,
     Query(query): Query<super::schema::RatesQuery>,
 ) -> Result<Json<super::schema::RatesResponse>, (StatusCode, Json<super::schema::SwapErrorResponse>)> {
-    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()));
+    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()), Some(state.wallet_mnemonic.clone()));
 
     let response = crud.get_rates_optimized(&query).await.map_err(|e| {
         (
@@ -141,7 +141,7 @@ pub async fn get_swap_status(
     State(state): State<Arc<AppState>>,
     Path(swap_id): Path<String>,
 ) -> Result<Json<SwapStatusResponse>, (StatusCode, Json<SwapErrorResponse>)> {
-    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()));
+    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()), Some(state.wallet_mnemonic.clone()));
 
     let response = crud.get_swap_status(&swap_id).await.map_err(|e| {
         let status = match e {
@@ -164,7 +164,7 @@ pub async fn validate_address(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ValidateAddressRequest>,
 ) -> Result<Json<ValidateAddressResponse>, (StatusCode, Json<SwapErrorResponse>)> {
-    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()));
+    let crud = SwapCrud::new(state.db.clone(), Some(state.redis.clone()), Some(state.wallet_mnemonic.clone()));
 
     let response = crud.validate_address(&payload).await.map_err(|e| {
         let status = match e {

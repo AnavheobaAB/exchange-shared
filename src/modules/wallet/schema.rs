@@ -10,6 +10,8 @@ pub struct GenerateAddressRequest {
     pub swap_id: String,
     pub ticker: String,
     pub network: String,
+    pub user_recipient_address: String,
+    pub user_recipient_extra_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

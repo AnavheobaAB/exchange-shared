@@ -9,6 +9,10 @@ use std::str::FromStr;
 use hex;
 use bs58;
 use ed25519_dalek::SigningKey as EdSigningKey;
+use monero::network::Network as MoneroNetwork;
+use monero::{Address, PrivateKey as MoneroPrivateKey, PublicKey as MoneroPublicKey};
+use tiny_keccak::{Hasher, Keccak};
+use curve25519_dalek::scalar::Scalar;
 
 // =============================================================================
 // HD WALLET DERIVATION
@@ -205,6 +209,49 @@ pub async fn derive_sui_address(seed_phrase: &str, index: u32) -> Result<String,
     Ok(format!("0x{}", hex::encode(hash)))
 }
 
+/// Derive Monero (XMR) address from seed phrase and index
+pub async fn derive_xmr_address(seed_phrase: &str, index: u32) -> Result<String, String> {
+    if !is_valid_seed_phrase(seed_phrase) {
+        return Err("Invalid seed phrase".to_string());
+    }
+
+    let mnemonic = Mnemonic::parse_in_normalized(Language::English, seed_phrase)
+        .map_err(|e| format!("Invalid mnemonic: {}", e))?;
+    let seed = mnemonic.to_seed("");
+
+    // 1. Derive deterministic Monero spend key bytes from seed
+    let mut hasher = Keccak::v256();
+    hasher.update(&seed);
+    hasher.update(b"monero_payout_derivation");
+    hasher.update(&index.to_le_bytes());
+    let mut spend_bytes = [0u8; 32];
+    hasher.finalize(&mut spend_bytes);
+
+    // 2. Reduce modulo order to make it a valid Monero/Ed25519 spend key
+    let spend_scalar = Scalar::from_bytes_mod_order(spend_bytes);
+    let spend_key = MoneroPrivateKey::from_slice(&spend_scalar.to_bytes())
+        .map_err(|e| format!("Invalid spend key: {}", e))?;
+
+    // 3. Derive view key from spend key: view_key = Keccak256(spend_key) reduced mod l
+    let mut hasher = Keccak::v256();
+    hasher.update(&spend_scalar.to_bytes());
+    let mut view_bytes = [0u8; 32];
+    hasher.finalize(&mut view_bytes);
+    
+    let view_scalar = Scalar::from_bytes_mod_order(view_bytes);
+    let view_key = MoneroPrivateKey::from_slice(&view_scalar.to_bytes())
+        .map_err(|e| format!("Invalid view key: {}", e))?;
+
+    // 4. Generate public keys
+    let public_spend = MoneroPublicKey::from_private_key(&spend_key);
+    let public_view = MoneroPublicKey::from_private_key(&view_key);
+
+    // 5. Construct Address
+    let address = Address::standard(MoneroNetwork::Mainnet, public_spend, public_view);
+
+    Ok(address.to_string())
+}
+
 /// Validate BIP39 seed phrase
 pub fn is_valid_seed_phrase(seed_phrase: &str) -> bool {
     let words: Vec<&str> = seed_phrase.split_whitespace().collect();
@@ -212,6 +259,40 @@ pub fn is_valid_seed_phrase(seed_phrase: &str) -> bool {
         return false;
     }
     Mnemonic::parse_in_normalized(Language::English, seed_phrase).is_ok()
+}
+
+/// High-level dispatcher to derive address for any supported chain
+pub async fn derive_address(
+    seed_phrase: &str,
+    ticker: &str,
+    network: &str,
+    index: u32,
+) -> Result<String, String> {
+    let ticker_lower = ticker.to_lowercase();
+    let network_lower = network.to_lowercase();
+
+    match network_lower.as_str() {
+        "ethereum" | "polygon" | "bsc" | "arbitrum" | "optimism" | "erc20" | "bep20" => {
+            derive_evm_address(seed_phrase, index).await
+        }
+        "bitcoin" => {
+            derive_btc_address(seed_phrase, index).await
+        }
+        "solana" | "sol" => {
+            derive_solana_address(seed_phrase, index).await
+        }
+        "mainnet" => {
+            match ticker_lower.as_str() {
+                "btc" => derive_btc_address(seed_phrase, index).await,
+                "eth" => derive_evm_address(seed_phrase, index).await,
+                "sol" => derive_solana_address(seed_phrase, index).await,
+                "sui" => derive_sui_address(seed_phrase, index).await,
+                "xmr" => derive_xmr_address(seed_phrase, index).await,
+                _ => Err(format!("Unsupported coin {} on Mainnet", ticker)),
+            }
+        }
+        _ => Err(format!("Unsupported network: {}", network)),
+    }
 }
 
 /// Sign message with derived key (for testing signature consistency)
