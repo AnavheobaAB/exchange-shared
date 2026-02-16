@@ -1,6 +1,8 @@
 use axum_test::TestServer;
 use exchange_shared::services::redis_cache::RedisService;
 use sqlx::{MySql, Pool};
+use async_trait::async_trait;
+use exchange_shared::services::wallet::rpc::{BlockchainProvider, RpcError};
 
 // Allow dead_code for utilities used by other test files
 #[allow(dead_code)]
@@ -102,4 +104,20 @@ pub async fn timed_post<T: serde::Serialize>(server: &TestServer, path: &str, bo
     let duration = start.elapsed();
     println!("⏱️ POST {} took {:?}", path, duration);
     response
+}
+
+// =============================================================================
+// MOCK PROVIDER (NO-OP)
+// =============================================================================
+
+#[allow(dead_code)]
+#[derive(Clone)]
+pub struct NoOpProvider;
+
+#[async_trait]
+impl BlockchainProvider for NoOpProvider {
+    async fn get_transaction_count(&self, _address: &str) -> Result<u64, RpcError> { Ok(0) }
+    async fn get_gas_price(&self) -> Result<u64, RpcError> { Ok(0) }
+    async fn send_raw_transaction(&self, _signed_hex: &str) -> Result<String, RpcError> { Ok("".to_string()) }
+    async fn get_balance(&self, _address: &str) -> Result<f64, RpcError> { Ok(0.0) }
 }

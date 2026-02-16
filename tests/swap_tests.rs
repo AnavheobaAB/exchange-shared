@@ -7,4 +7,5 @@ mod swap {
     pub mod status_test;
     pub mod validate_address_test;
     pub mod middleman_flow_test;
+    pub mod algorithmic_pricing_test;
 }

@@ -7,3 +7,4 @@ pub mod security;
 pub mod wallet;
 pub mod trocador;
 pub mod monitor;
+pub mod pricing;

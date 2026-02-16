@@ -3,6 +3,7 @@ use sqlx::{MySql, Pool};
 use crate::modules::monitor::crud::MonitorCrud;
 use crate::services::trocador::TrocadorClient;
 use crate::services::wallet::manager::WalletManager;
+use crate::services::wallet::rpc::HttpRpcClient;
 use crate::services::redis_cache::RedisService;
 use crate::modules::monitor::model::PollingState;
 
@@ -76,7 +77,9 @@ impl MonitorEngine {
             tracing::info!("Swap {} finished on Trocador. Executing bridge payout.", state.swap_id);
             
             let wallet_crud = crate::modules::wallet::crud::WalletCrud::new(self.db.clone());
-            let wallet_manager = WalletManager::new(wallet_crud, self.master_seed.clone());
+            let rpc_url = std::env::var("ETH_RPC_URL").unwrap_or_else(|_| "http://localhost:8545".to_string());
+            let provider = std::sync::Arc::new(HttpRpcClient::new(rpc_url));
+            let wallet_manager = WalletManager::new(wallet_crud, self.master_seed.clone(), provider);
             
             match wallet_manager.process_payout(crate::modules::wallet::schema::PayoutRequest {
                 swap_id: state.swap_id.clone(),

@@ -6,6 +6,7 @@ use super::model::{Currency, Provider};
 use super::schema::{CurrenciesQuery, ProvidersQuery, TrocadorCurrency, TrocadorProvider, CurrencyResponse, ProviderResponse};
 use crate::services::trocador::{TrocadorClient, TrocadorError};
 use crate::services::redis_cache::RedisService;
+use crate::services::pricing::PricingEngine;
 
 pub enum CurrenciesResult {
     RawJson(String),
@@ -73,6 +74,20 @@ pub struct SwapCrud {
 impl SwapCrud {
     pub fn new(pool: Pool<MySql>, redis_service: Option<RedisService>, wallet_mnemonic: Option<String>) -> Self {
         Self { pool, redis_service, wallet_mnemonic }
+    }
+
+    /// Internal helper to estimate gas cost for payout on the target network
+    async fn get_gas_cost_for_network(&self, network: &str) -> f64 {
+        // TODO: In a production environment, use RpcClient to fetch real gas prices
+        // and multiply by the typical transaction gas limit (e.g., 21,000 for ETH).
+        // For now, we use a conservative safe placeholder.
+        match network.to_lowercase().as_str() {
+            "ethereum" | "erc20" => 0.002, // ETH
+            "bitcoin" => 0.0001,          // BTC
+            "solana" | "sol" => 0.00001,  // SOL
+            "polygon" | "bsc" => 0.001,   // Layer 2s
+            _ => 0.001,                   // Default
+        }
     }
 
     // =========================================================================
@@ -760,45 +775,16 @@ impl SwapCrud {
         })
         .await?;
 
-        // Transform and sort quotes
-        let mut rates: Vec<super::schema::RateResponse> = trocador_res
-            .quotes
-            .quotes
-            .into_iter()
-            .map(|quote| {
-                let amount_to = quote.amount_to.parse::<f64>().unwrap_or(0.0);
-                let waste = quote.waste.as_deref().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
-                
-                // MIDDLEMAN FLOW: Apply 1% platform commission
-                let platform_commission_rate = 0.01;
-                let platform_fee = amount_to * platform_commission_rate;
-                let final_user_receive = amount_to - platform_fee;
-                let total_fee = waste + platform_fee;
-                
-                super::schema::RateResponse {
-                    provider: quote.provider.clone(),
-                    provider_name: quote.provider.clone(),
-                    rate: final_user_receive / query.amount,
-                    estimated_amount: final_user_receive,
-                    min_amount: quote.min_amount.unwrap_or(0.0),
-                    max_amount: quote.max_amount.unwrap_or(0.0),
-                    network_fee: 0.0,
-                    provider_fee: waste,
-                    platform_fee,
-                    total_fee,
-                    rate_type: query.rate_type.clone().unwrap_or(super::schema::RateType::Floating),
-                    kyc_required: quote.kycrating.as_deref().unwrap_or("D") != "A",
-                    kyc_rating: quote.kycrating,
-                    eta_minutes: quote.eta.map(|e| e as u32).or(Some(15)),
-                }
-            })
-            .collect();
-
-        rates.sort_by(|a, b| {
-            b.estimated_amount
-                .partial_cmp(&a.estimated_amount)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // ALGORITHMIC PRICING: Use PricingEngine to calculate optimal rates
+        let pricing_engine = PricingEngine::new();
+        let gas_cost = self.get_gas_cost_for_network(&query.network_to).await;
+        
+        let rates = pricing_engine.apply_optimal_markup(
+            &trocador_res.quotes.quotes,
+            query.amount,
+            &query.from, // Changed from &query.network_to
+            gas_cost,
+        );
 
         Ok(super::schema::RatesResponse {
             trade_id: trocador_res.trade_id,
@@ -870,10 +856,30 @@ impl SwapCrud {
         })
         .await?;
 
-        // 3. Apply platform commission (1%)
-        let commission_rate = 0.01;
-        let platform_fee = trocador_res.amount_to * commission_rate;
-        let estimated_user_receive = trocador_res.amount_to - platform_fee;
+        // ALGORITHMIC PRICING: Calculate fee for final swap creation (must match rate quote)
+        let gas_cost = self.get_gas_cost_for_network(&request.network_to).await;
+        
+        // Transform single quote to mock list for engine compatibility or use engine logic directly
+        // Better: We use the engine's internal math directly for a single value
+        // Fee = Max( Gas_Cost * 1.5, Amount_To * Tier_Rate + Volatility_Premium )
+        // Since create_swap uses a chosen provider, provider spread isn't relevant here, 
+        // we use the tier-based rate.
+        
+        let trocador_amount = trocador_res.amount_to;
+        let mut platform_fee = if request.amount < 200.0 {
+            trocador_amount * 0.012
+        } else if request.amount < 2000.0 {
+            trocador_amount * 0.007
+        } else {
+            trocador_amount * 0.004
+        };
+
+        let gas_floor = gas_cost * 1.5;
+        if platform_fee < gas_floor {
+            platform_fee = gas_floor;
+        }
+
+        let estimated_user_receive = (trocador_amount - platform_fee).max(0.0);
 
         // 4. Map Trocador status to our internal SwapStatus
         let status = match trocador_res.status.as_str() {

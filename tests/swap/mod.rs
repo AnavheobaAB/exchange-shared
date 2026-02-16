@@ -13,4 +13,5 @@ pub mod multi_chain_test;
 pub mod commission_test;
 pub mod wallet_validation_test;
 pub mod middleman_flow_test;
+pub mod algorithmic_pricing_test;
 

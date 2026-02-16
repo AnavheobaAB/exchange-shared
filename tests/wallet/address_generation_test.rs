@@ -6,6 +6,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+use std::sync::Arc;
 use exchange_shared::modules::wallet::crud::WalletCrud;
 use exchange_shared::modules::wallet::schema::GenerateAddressRequest;
 use exchange_shared::services::wallet::manager::WalletManager;
@@ -40,7 +41,7 @@ async fn test_unique_address_per_swap() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
     let crud = WalletCrud::new(ctx.db.clone());
-    let manager = WalletManager::new(crud, seed_phrase.to_string());
+    let manager = WalletManager::new(crud, seed_phrase.to_string(), Arc::new(common::NoOpProvider));
     
     let mut addresses = vec![];
     
@@ -52,6 +53,8 @@ async fn test_unique_address_per_swap() {
             swap_id: swap_id.clone(),
             ticker: "ETH".to_string(),
             network: "ethereum".to_string(),
+            user_recipient_address: "0x742d35Cc6634C0532925a3b844Bc9e7595f5bE12".to_string(),
+            user_recipient_extra_id: None,
         };
         
         let res = manager.get_or_generate_address(req).await.unwrap();
@@ -83,7 +86,7 @@ async fn test_address_sequence_predictable() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
     let crud = WalletCrud::new(ctx.db.clone());
-    let manager = WalletManager::new(crud, seed_phrase.to_string());
+    let manager = WalletManager::new(crud, seed_phrase.to_string(), Arc::new(common::NoOpProvider));
     
     let swap_id_0 = Uuid::new_v4().to_string();
     let swap_id_1 = Uuid::new_v4().to_string();
@@ -94,6 +97,8 @@ async fn test_address_sequence_predictable() {
         swap_id: swap_id_0,
         ticker: "ETH".to_string(),
         network: "ethereum".to_string(),
+        user_recipient_address: "0x742d35Cc6634C0532925a3b844Bc9e7595f5bE12".to_string(),
+        user_recipient_extra_id: None,
     }).await.unwrap();
     
     // Swap 1
@@ -102,6 +107,8 @@ async fn test_address_sequence_predictable() {
         swap_id: swap_id_1,
         ticker: "ETH".to_string(),
         network: "ethereum".to_string(),
+        user_recipient_address: "0x742d35Cc6634C0532925a3b844Bc9e7595f5bE12".to_string(),
+        user_recipient_extra_id: None,
     }).await.unwrap();
     
     assert_ne!(res_0.address, res_1.address);
@@ -123,7 +130,7 @@ async fn test_address_idempotency() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
     let crud = WalletCrud::new(ctx.db.clone());
-    let manager = WalletManager::new(crud, seed_phrase.to_string());
+    let manager = WalletManager::new(crud, seed_phrase.to_string(), Arc::new(common::NoOpProvider));
     
     let swap_id = Uuid::new_v4().to_string();
     create_dummy_swap(&ctx.db, &swap_id).await;
@@ -132,6 +139,8 @@ async fn test_address_idempotency() {
         swap_id: swap_id.to_string(),
         ticker: "ETH".to_string(),
         network: "ethereum".to_string(),
+        user_recipient_address: "0x742d35Cc6634C0532925a3b844Bc9e7595f5bE12".to_string(),
+        user_recipient_extra_id: None,
     };
     
     let res_1 = manager.get_or_generate_address(req.clone()).await.unwrap();
@@ -155,7 +164,7 @@ async fn test_cross_chain_generation() {
     let seed_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     
     let crud = WalletCrud::new(ctx.db.clone());
-    let manager = WalletManager::new(crud, seed_phrase.to_string());
+    let manager = WalletManager::new(crud, seed_phrase.to_string(), Arc::new(common::NoOpProvider));
     
     let btc_swap = Uuid::new_v4().to_string();
     let eth_swap = Uuid::new_v4().to_string();
@@ -166,6 +175,8 @@ async fn test_cross_chain_generation() {
         swap_id: btc_swap,
         ticker: "BTC".to_string(),
         network: "bitcoin".to_string(),
+        user_recipient_address: "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_string(),
+        user_recipient_extra_id: None,
     }).await.unwrap();
     
     // ETH Swap
@@ -174,6 +185,8 @@ async fn test_cross_chain_generation() {
         swap_id: eth_swap,
         ticker: "ETH".to_string(),
         network: "ethereum".to_string(),
+        user_recipient_address: "0x742d35Cc6634C0532925a3b844Bc9e7595f5bE12".to_string(),
+        user_recipient_extra_id: None,
     }).await.unwrap();
     
     assert!(btc_res.address.starts_with("1") || btc_res.address.starts_with("bc1"));

@@ -1,16 +1,20 @@
+use std::sync::Arc;
 use crate::modules::wallet::crud::WalletCrud;
 use crate::modules::wallet::schema::{GenerateAddressRequest, WalletAddressResponse, PayoutRequest, PayoutResponse};
 use super::derivation;
 use super::signing::SigningService;
+use super::rpc::BlockchainProvider;
+use crate::services::pricing::{PricingContext, PricingStrategy, AdaptivePricingStrategy};
 
 pub struct WalletManager {
     crud: WalletCrud,
     master_seed: String,
+    provider: Arc<dyn BlockchainProvider>,
 }
 
 impl WalletManager {
-    pub fn new(crud: WalletCrud, master_seed: String) -> Self {
-        Self { crud, master_seed }
+    pub fn new(crud: WalletCrud, master_seed: String, provider: Arc<dyn BlockchainProvider>) -> Self {
+        Self { crud, master_seed, provider }
     }
 
     /// High-level orchestrator to generate a new swap address
@@ -71,31 +75,70 @@ impl WalletManager {
             });
         }
 
-        // 3. Derive private key
+        // 3. Prepare for Transaction Building
+        // We need the SENDER address to get the correct nonce.
+        // Assuming EVM for now based on previous mock.
+        // TODO: Switch based on network (info.network or req context)
+        let sender_address = derivation::derive_evm_address(&self.master_seed, info.address_index).await?;
         let private_key = derivation::derive_evm_key(&self.master_seed).await?; 
 
-        // 4. Build and Sign Transaction (Mocked for now)
-        let mock_tx = crate::modules::wallet::schema::EvmTransaction {
-            to_address: info.recipient_address,
-            amount: info.payout_amount.unwrap_or(0.0),
-            token: "ETH".to_string(),
-            chain_id: 1,
-            nonce: 0,
-            gas_price: 20000000000,
+        // 4. Fetch Chain Data (Real RPC Calls)
+        let nonce = self.provider.get_transaction_count(&sender_address).await
+            .map_err(|e| format!("Failed to get nonce: {}", e))?;
+            
+        let gas_price = self.provider.get_gas_price().await
+            .map_err(|e| format!("Failed to get gas price: {}", e))?;
+
+        // 5. ALGORITHMIC PRICING: Calculate final payout after dynamic fee
+        let pricing_strategy = AdaptivePricingStrategy::default();
+        let raw_received = info.payout_amount.unwrap_or(0.0);
+        
+        // Estimate gas cost in native token (Gas Price * typical limit 21000)
+        let gas_limit = 21000.0;
+        let estimated_gas_native = (gas_price as f64 * gas_limit) / 1_000_000_000_000_000_000.0;
+
+        let ctx = PricingContext {
+            amount_usd: raw_received, // Heuristic: raw amount as USD proxy for testing
+            network_gas_cost_native: estimated_gas_native,
+            provider_spread_percentage: 0.0, // No spread during payout phase
         };
 
-        let signature = SigningService::sign_evm_transaction(&private_key, &mock_tx)?;
+        let (commission_rate, gas_floor) = pricing_strategy.calculate_fees(&ctx);
+        
+        let mut platform_fee = raw_received * commission_rate;
+        if platform_fee < gas_floor {
+            platform_fee = gas_floor;
+        }
 
-        // 5. Broadcast
-        let tx_hash = format!("0x_broadcasted_{}", signature.chars().take(10).collect::<String>());
+        let final_payout: f64 = (raw_received - platform_fee).max(0.0);
 
-        // 6. Update DB with tx_hash AND status
+        if final_payout <= 0.0 {
+            return Err(format!("Payout amount too small to cover gas: {}", raw_received));
+        }
+
+        // 6. Build and Sign Transaction
+        let tx = crate::modules::wallet::schema::EvmTransaction {
+            to_address: info.recipient_address,
+            amount: final_payout,
+            token: "ETH".to_string(), 
+            chain_id: 1, 
+            nonce,
+            gas_price,
+        };
+
+        let signature = SigningService::sign_evm_transaction(&private_key, &tx)?;
+
+        // 7. Broadcast Real Transaction
+        let tx_hash = self.provider.send_raw_transaction(&signature).await
+            .map_err(|e| format!("Failed to broadcast: {}", e))?;
+
+        // 8. Update DB with tx_hash AND status
         self.crud.mark_payout_completed(&req.swap_id, &tx_hash).await
             .map_err(|e: sqlx::Error| e.to_string())?;
 
         Ok(PayoutResponse {
             tx_hash,
-            amount: info.payout_amount.unwrap_or(0.0),
+            amount: final_payout,
             status: crate::modules::wallet::model::PayoutStatus::Success,
         })
     }

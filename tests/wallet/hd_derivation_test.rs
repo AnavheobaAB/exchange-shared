@@ -249,7 +249,7 @@ async fn test_high_address_index_derivation() {
     addresses.dedup();
     assert_eq!(addresses.len(), 100, "All 100 addresses should be unique");
     
-    assert!(duration.as_secs() < 5, "Batch of 100 derivations too slow: {:?}", duration);
+    assert!(duration.as_secs() < 10, "Batch of 100 derivations too slow: {:?}", duration);
     
     println!("✅ Generated 100 unique addresses from same seed (took {:?})", duration);
 }

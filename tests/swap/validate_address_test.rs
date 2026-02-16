@@ -403,7 +403,7 @@ async fn test_validate_address_multiple_rapid_calls() {
             i
         );
         
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_secs(1)).await;
     }
 }
 
