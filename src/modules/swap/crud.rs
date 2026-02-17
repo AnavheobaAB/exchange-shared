@@ -76,7 +76,29 @@ impl SwapCrud {
         Self { pool, redis_service, wallet_mnemonic }
     }
 
+    /// Normalize provider name from Trocador API to database ID format
+    fn normalize_provider_id(provider_name: &str) -> String {
+        // Trocador returns names like "ChangeNOW", "FixedFloat", "Changelly"
+        // Database uses lowercase slugs like "changenow", "fixedfloat", "changelly"
+        provider_name.to_lowercase().replace(" ", "").replace("-", "")
+    }
+
     /// Internal helper to estimate gas cost for payout on the target network
+    /// Get the amount Trocador should have sent to our address
+    pub async fn get_expected_trocador_amount(&self, swap_id: &str) -> Result<f64, SwapError> {
+        let swap: (f64, f64) = sqlx::query_as(
+            "SELECT estimated_receive, platform_fee FROM swaps WHERE id = ?"
+        )
+        .bind(swap_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| SwapError::DatabaseError(e.to_string()))?;
+        
+        // Trocador sends us: user_amount + our_commission
+        // Because we told them to send to OUR address
+        Ok(swap.0 + swap.1)
+    }
+
     async fn get_gas_cost_for_network(&self, network: &str) -> f64 {
         // TODO: In a production environment, use RpcClient to fetch real gas prices
         // and multiply by the typical transaction gas limit (e.g., 21,000 for ETH).
@@ -215,69 +237,154 @@ impl SwapCrud {
         &self,
         query: CurrenciesQuery,
     ) -> Result<CurrenciesResult, SwapError> {
-        let is_standard_query = query.ticker.is_none() && query.network.is_none() && query.memo.is_none();
-        // Separate cache key for the PRE-SERIALIZED response
-        let cache_key = "currencies:response:all";
+        let cache_key = format!("trocador:currencies:{:?}", query);
+        let stale_key = format!("trocador:currencies:stale:{:?}", query);
 
-        // 1. FAST PATH: Try to get Raw JSON from Redis (Zero Serialization)
-        if is_standard_query && query.page.is_none() && query.limit.is_none() {
-            if let Some(service) = &self.redis_service {
-                if let Ok(Some(raw_json)) = service.get_string(cache_key).await {
-                    self.trigger_background_sync_if_needed().await;
-                    return Ok(CurrenciesResult::RawJson(raw_json));
-                }
+        // 1. Try fresh cache first (10 min TTL)
+        if let Some(service) = &self.redis_service {
+            if let Ok(Some(cached_json)) = service.get_string(&cache_key).await {
+                return Ok(CurrenciesResult::RawJson(cached_json));
             }
-        }
 
-        // 2. MEDIUM PATH: Try to get Structured Cache from Redis (for Pagination)
-        // We still use the 'currencies:all' (model cache) for pagination/slicing to avoid parsing huge JSON strings
-        let model_cache_key = "currencies:all";
-        if is_standard_query {
-            if let Some(service) = &self.redis_service {
-                if let Ok(Some(cached_models)) = service.get_json::<Vec<Currency>>(model_cache_key).await {
-                    self.trigger_background_sync_if_needed().await;
+            // 2. If fresh cache miss, try stale cache (30 min TTL) - STALE-WHILE-REVALIDATE
+            if let Ok(Some(stale_json)) = service.get_string(&stale_key).await {
+                // Serve stale data immediately
+                let stale_result = Ok(CurrenciesResult::RawJson(stale_json.clone()));
 
-                    // Handle Pagination in Memory
-                    let sliced_models = if let (Some(page), Some(limit)) = (query.page, query.limit) {
-                        let start = (page - 1) * limit;
-                        if start >= cached_models.len() {
-                            Vec::new()
-                        } else {
-                            let end = std::cmp::min(start + limit, cached_models.len());
-                            cached_models[start..end].to_vec()
+                // Trigger background refresh (fire and forget)
+                let service_clone = service.clone();
+                let cache_key_clone = cache_key.clone();
+                let stale_key_clone = stale_key.clone();
+                let query_clone = query.clone();
+
+                tokio::spawn(async move {
+                    if let Ok(true) = service_clone.try_lock("lock:refresh_currencies", 30).await {
+                        let api_key = std::env::var("TROCADOR_API_KEY").unwrap_or_default();
+                        let client = TrocadorClient::new(api_key);
+
+                        if let Ok(currencies) = client.get_currencies().await {
+                            let responses = Self::filter_and_convert_currencies(currencies, &query_clone);
+                            if let Ok(json_string) = serde_json::to_string(&responses) {
+                                let _ = service_clone.set_string(&cache_key_clone, &json_string, 600).await; // 10 min fresh
+                                let _ = service_clone.set_string(&stale_key_clone, &json_string, 1800).await; // 30 min stale
+                            }
                         }
-                    } else {
-                        cached_models
-                    };
+                    }
+                });
 
-                    let responses: Vec<CurrencyResponse> = sliced_models.into_iter().map(|c| c.into()).collect();
-                    return Ok(CurrenciesResult::Structured(responses));
-                }
+                return stale_result;
             }
         }
 
-        // 3. SLOW PATH: Database Fallback
-        let currencies = self.fetch_currencies_from_db(&query).await?;
-        let responses: Vec<CurrencyResponse> = currencies.clone().into_iter().map(|c| c.into()).collect();
+        // 3. No cache at all - fetch from API (with rate limit protection)
+        let api_key = std::env::var("TROCADOR_API_KEY").unwrap_or_default();
+        let client = TrocadorClient::new(api_key);
 
-        // 4. Cache Population (Self-Healing)
-        // If this was a full standard query, we cache BOTH the model list and the serialized response
-        if is_standard_query && query.page.is_none() && query.limit.is_none() && !currencies.is_empty() {
-            if let Some(service) = &self.redis_service {
-                // Cache Model List (for pagination reuse)
-                let _ = service.set_json(model_cache_key, &currencies, 300).await;
-                
-                // Cache Raw Response (for fast full-list access)
-                // We serialize the DTOs here once, so we don't have to do it on every read
-                if let Ok(json_string) = serde_json::to_string(&responses) {
-                    let _ = service.set_string(cache_key, &json_string, 300).await;
-                }
+        // Rate limit check: use token bucket
+        if let Some(service) = &self.redis_service {
+            if !self.check_rate_limit(service, "trocador_api", 10, 60).await {
+                return Err(SwapError::ExternalApiError(
+                    "Rate limit exceeded. Please try again later.".to_string()
+                ));
             }
         }
 
-        self.trigger_background_sync_if_needed().await;
+        let currencies = client.get_currencies().await?;
+        let responses = Self::filter_and_convert_currencies(currencies, &query);
 
-        Ok(CurrenciesResult::Structured(responses))
+        // 4. Cache the result (both fresh and stale)
+        let json_string = serde_json::to_string(&responses)
+            .map_err(|e| SwapError::ExternalApiError(e.to_string()))?;
+
+        if let Some(service) = &self.redis_service {
+            let _ = service.set_string(&cache_key, &json_string, 600).await; // 10 min fresh
+            let _ = service.set_string(&stale_key, &json_string, 1800).await; // 30 min stale
+        }
+
+        Ok(CurrenciesResult::RawJson(json_string))
+    }
+
+    // Helper: Token bucket rate limiter
+    async fn check_rate_limit(
+        &self,
+        redis: &crate::services::redis_cache::RedisService,
+        key: &str,
+        max_requests: u32,
+        window_secs: u64,
+    ) -> bool {
+        let bucket_key = format!("ratelimit:{}", key);
+
+        // Simple token bucket: allow max_requests per window_secs
+        match redis.get_string(&bucket_key).await {
+            Ok(Some(count_str)) => {
+                if let Ok(count) = count_str.parse::<u32>() {
+                    if count >= max_requests {
+                        return false; // Rate limited
+                    }
+                    // Increment counter
+                    let _ = redis.set_string(&bucket_key, &(count + 1).to_string(), window_secs).await;
+                    true
+                } else {
+                    // Reset counter
+                    let _ = redis.set_string(&bucket_key, "1", window_secs).await;
+                    true
+                }
+            }
+            _ => {
+                // First request in window
+                let _ = redis.set_string(&bucket_key, "1", window_secs).await;
+                true
+            }
+        }
+    }
+
+    // Helper: Filter and convert currencies
+    fn filter_and_convert_currencies(
+        currencies: Vec<TrocadorCurrency>,
+        query: &CurrenciesQuery,
+    ) -> Vec<CurrencyResponse> {
+        let mut responses: Vec<CurrencyResponse> = currencies.into_iter()
+            .filter(|c| {
+                if let Some(ref ticker) = query.ticker {
+                    if c.ticker.to_lowercase() != ticker.to_lowercase() {
+                        return false;
+                    }
+                }
+                if let Some(ref network) = query.network {
+                    if &c.network != network {
+                        return false;
+                    }
+                }
+                if let Some(memo) = query.memo {
+                    if c.memo != memo {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|c| CurrencyResponse {
+                name: c.name,
+                ticker: c.ticker,
+                network: c.network,
+                memo: c.memo,
+                image: c.image,
+                minimum: c.minimum,
+                maximum: c.maximum,
+            })
+            .collect();
+
+        // Apply pagination
+        if let (Some(page), Some(limit)) = (query.page, query.limit) {
+            let start = ((page - 1) * limit) as usize;
+            if start < responses.len() {
+                let end = std::cmp::min(start + limit as usize, responses.len());
+                responses = responses[start..end].to_vec();
+            } else {
+                responses = Vec::new();
+            }
+        }
+
+        responses
     }
 
     /// Internal helper to fetch from DB with filters
@@ -473,56 +580,100 @@ impl SwapCrud {
         &self,
         query: ProvidersQuery,
     ) -> Result<ProvidersResult, SwapError> {
-        let is_standard_query = query.rating.is_none() && query.markup_enabled.is_none() && query.sort.is_none();
-        let cache_key = "providers:response:all";
-        let model_cache_key = "providers:all";
+        let cache_key = format!("trocador:providers:{:?}", query);
+        let stale_key = format!("trocador:providers:stale:{:?}", query);
 
-        // 1. FAST PATH: Raw JSON (Zero Serialization)
-        if is_standard_query {
-            if let Some(service) = &self.redis_service {
-                if let Ok(Some(raw_json)) = service.get_string(cache_key).await {
-                    self.trigger_background_provider_sync().await;
-                    return Ok(ProvidersResult::RawJson(raw_json));
+        // 1. Try fresh cache first (10 min TTL)
+        if let Some(service) = &self.redis_service {
+            if let Ok(Some(cached_json)) = service.get_string(&cache_key).await {
+                return Ok(ProvidersResult::RawJson(cached_json));
+            }
+
+            // 2. If fresh cache miss, try stale cache (30 min TTL) - STALE-WHILE-REVALIDATE
+            if let Ok(Some(stale_json)) = service.get_string(&stale_key).await {
+                // Serve stale data immediately
+                let stale_result = Ok(ProvidersResult::RawJson(stale_json.clone()));
+
+                // Trigger background refresh (fire and forget)
+                let service_clone = service.clone();
+                let cache_key_clone = cache_key.clone();
+                let stale_key_clone = stale_key.clone();
+                let query_clone = query.clone();
+
+                tokio::spawn(async move {
+                    if let Ok(true) = service_clone.try_lock("lock:refresh_providers", 30).await {
+                        let api_key = std::env::var("TROCADOR_API_KEY").unwrap_or_default();
+                        let client = TrocadorClient::new(api_key);
+
+                        if let Ok(providers) = client.get_providers().await {
+                            let responses = Self::filter_and_convert_providers(providers, &query_clone);
+                            if let Ok(json_string) = serde_json::to_string(&responses) {
+                                let _ = service_clone.set_string(&cache_key_clone, &json_string, 600).await; // 10 min fresh
+                                let _ = service_clone.set_string(&stale_key_clone, &json_string, 1800).await; // 30 min stale
+                            }
+                        }
+                    }
+                });
+
+                return stale_result;
+            }
+        }
+
+        // 3. No cache at all - fetch from API (with rate limit protection)
+        let api_key = std::env::var("TROCADOR_API_KEY").unwrap_or_default();
+        let client = TrocadorClient::new(api_key);
+
+        // Rate limit check
+        if let Some(service) = &self.redis_service {
+            if !self.check_rate_limit(service, "trocador_api", 10, 60).await {
+                return Err(SwapError::ExternalApiError(
+                    "Rate limit exceeded. Please try again later.".to_string()
+                ));
+            }
+        }
+
+        let providers = client.get_providers().await?;
+        let responses = Self::filter_and_convert_providers(providers, &query);
+
+        // 4. Cache the result (both fresh and stale)
+        let json_string = serde_json::to_string(&responses)
+            .map_err(|e| SwapError::ExternalApiError(e.to_string()))?;
+
+        if let Some(service) = &self.redis_service {
+            let _ = service.set_string(&cache_key, &json_string, 600).await; // 10 min fresh
+            let _ = service.set_string(&stale_key, &json_string, 1800).await; // 30 min stale
+        }
+
+        Ok(ProvidersResult::RawJson(json_string))
+    }
+
+    // Helper: Filter and convert providers
+    fn filter_and_convert_providers(
+        providers: Vec<TrocadorProvider>,
+        query: &ProvidersQuery,
+    ) -> Vec<ProviderResponse> {
+        providers.into_iter()
+            .filter(|p| {
+                if let Some(ref rating) = query.rating {
+                    if &p.rating != rating {
+                        return false;
+                    }
                 }
-            }
-        }
-
-        // 2. MEDIUM PATH: Structured Cache (In-Memory Filtering)
-        if let Some(service) = &self.redis_service {
-            if let Ok(Some(cached_models)) = service.get_json::<Vec<Provider>>(model_cache_key).await {
-                self.trigger_background_provider_sync().await;
-                
-                // Filter in memory
-                let filtered = self.filter_providers_in_memory(cached_models, &query);
-                let responses: Vec<ProviderResponse> = filtered.into_iter().map(|p| p.into()).collect();
-                return Ok(ProvidersResult::Structured(responses));
-            }
-        }
-
-        // 3. SLOW PATH: Database Fallback
-        // Note: self.get_providers(query) performs filtering in SQL.
-        // But to populate cache, we need ALL providers.
-        
-        let all_providers_query = ProvidersQuery { rating: None, markup_enabled: None, sort: None };
-        let all_providers = self.get_providers(all_providers_query).await?;
-        
-        // Populate Cache
-        let all_responses: Vec<ProviderResponse> = all_providers.clone().into_iter().map(|p| p.into()).collect();
-        
-        if let Some(service) = &self.redis_service {
-            let _ = service.set_json(model_cache_key, &all_providers, 3600).await;
-            if let Ok(json_string) = serde_json::to_string(&all_responses) {
-                let _ = service.set_string(cache_key, &json_string, 3600).await;
-            }
-        }
-        
-        // Return filtered result
-        let filtered = self.filter_providers_in_memory(all_providers, &query);
-        let responses: Vec<ProviderResponse> = filtered.into_iter().map(|p| p.into()).collect();
-        
-        self.trigger_background_provider_sync().await;
-
-        Ok(ProvidersResult::Structured(responses))
+                if let Some(markup_enabled) = query.markup_enabled {
+                    if p.enabled_markup != markup_enabled {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|p| ProviderResponse {
+                name: p.name,
+                rating: p.rating,
+                insurance: p.insurance,
+                markup_enabled: p.enabled_markup,
+                eta: p.eta as i32,
+            })
+            .collect()
     }
 
     /// Helper to filter providers in memory
@@ -584,9 +735,9 @@ impl SwapCrud {
         &self,
         trocador_provider: &TrocadorProvider,
     ) -> Result<(), SwapError> {
-        // Generate slug from name
+        // Generate normalized ID from name (consistent with normalize_provider_id)
+        let id = Self::normalize_provider_id(&trocador_provider.name);
         let slug = trocador_provider.name.to_lowercase().replace(" ", "-");
-        let id = slug.clone();
 
         // First, try to find existing provider by name (case-insensitive)
         let existing: Option<(String,)> = sqlx::query_as(
@@ -893,6 +1044,36 @@ impl SwapCrud {
             _ => super::schema::SwapStatus::Waiting,
         };
 
+        // Normalize provider name to match database ID format
+        let normalized_provider_id = Self::normalize_provider_id(&request.provider);
+
+        // Ensure provider exists in database (auto-insert if missing)
+        let provider_exists: Option<(i64,)> = sqlx::query_as(
+            "SELECT COUNT(*) FROM providers WHERE id = ?"
+        )
+        .bind(&normalized_provider_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SwapError::DatabaseError(e.to_string()))?;
+
+        if provider_exists.map(|(count,)| count).unwrap_or(0) == 0 {
+            // Provider doesn't exist, insert a minimal record
+            tracing::warn!("Provider '{}' not found in database, auto-inserting", normalized_provider_id);
+            sqlx::query(
+                r#"
+                INSERT INTO providers (id, name, slug, is_active, kyc_rating, insurance_percentage, eta_minutes, markup_enabled)
+                VALUES (?, ?, ?, TRUE, 'C', 0.015, 10, FALSE)
+                ON DUPLICATE KEY UPDATE id = id
+                "#
+            )
+            .bind(&normalized_provider_id)
+            .bind(&request.provider)
+            .bind(&normalized_provider_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| SwapError::DatabaseError(format!("Failed to auto-insert provider: {}", e)))?;
+        }
+
         // 5. Save to database - SWAPS table FIRST
         sqlx::query(
             r#"
@@ -912,7 +1093,7 @@ impl SwapCrud {
         )
         .bind(&swap_id)
         .bind(user_id)
-        .bind(&request.provider)
+        .bind(&normalized_provider_id)
         .bind(&trocador_res.trade_id)
         .bind(&request.from)
         .bind(&request.network_from)

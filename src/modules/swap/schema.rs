@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 // =============================================================================
 
 // Request query parameters for /swap/providers
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ProvidersQuery {
     pub rating: Option<String>,         // Filter by KYC rating (A, B, C, D)
     pub markup_enabled: Option<bool>,   // Filter by markup support
@@ -61,7 +61,7 @@ pub struct CurrenciesQuery {
 }
 
 // Response DTO matching Trocador's /coins format EXACTLY
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct CurrencyResponse {
     pub name: String,
     pub ticker: String,       // Maps from symbol
