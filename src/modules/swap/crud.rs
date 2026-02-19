@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{Utc, DateTime};
 use sqlx::{MySql, Pool};
 use std::time::Duration;
 
@@ -7,6 +7,7 @@ use super::schema::{CurrenciesQuery, ProvidersQuery, TrocadorCurrency, TrocadorP
 use crate::services::trocador::{TrocadorClient, TrocadorError};
 use crate::services::redis_cache::RedisService;
 use crate::services::pricing::PricingEngine;
+use crate::services::gas::GasEstimator;
 
 pub enum CurrenciesResult {
     RawJson(String),
@@ -33,7 +34,8 @@ pub enum SwapError {
     ProviderUnavailable(String),
     DatabaseError(String),
     ExternalApiError(String),
-    RedisError(String), // Added RedisError
+    RedisError(String),
+    InvalidCursor(String), // Added for cursor validation errors
 }
 
 impl std::fmt::Display for SwapError {
@@ -51,6 +53,7 @@ impl std::fmt::Display for SwapError {
             SwapError::DatabaseError(e) => write!(f, "Database error: {}", e),
             SwapError::ExternalApiError(e) => write!(f, "External API error: {}", e),
             SwapError::RedisError(e) => write!(f, "Redis error: {}", e),
+            SwapError::InvalidCursor(e) => write!(f, "Invalid cursor: {}", e),
         }
     }
 }
@@ -69,11 +72,13 @@ pub struct SwapCrud {
     pool: Pool<MySql>,
     redis_service: Option<RedisService>, // Changed to RedisService
     wallet_mnemonic: Option<String>,
+    gas_estimator: GasEstimator,
 }
 
 impl SwapCrud {
     pub fn new(pool: Pool<MySql>, redis_service: Option<RedisService>, wallet_mnemonic: Option<String>) -> Self {
-        Self { pool, redis_service, wallet_mnemonic }
+        let gas_estimator = GasEstimator::new(redis_service.clone());
+        Self { pool, redis_service, wallet_mnemonic, gas_estimator }
     }
 
     /// Normalize provider name from Trocador API to database ID format
@@ -100,16 +105,8 @@ impl SwapCrud {
     }
 
     async fn get_gas_cost_for_network(&self, network: &str) -> f64 {
-        // TODO: In a production environment, use RpcClient to fetch real gas prices
-        // and multiply by the typical transaction gas limit (e.g., 21,000 for ETH).
-        // For now, we use a conservative safe placeholder.
-        match network.to_lowercase().as_str() {
-            "ethereum" | "erc20" => 0.002, // ETH
-            "bitcoin" => 0.0001,          // BTC
-            "solana" | "sol" => 0.00001,  // SOL
-            "polygon" | "bsc" => 0.001,   // Layer 2s
-            _ => 0.001,                   // Default
-        }
+        // Use real-time gas price estimation with multi-tier caching and EMA smoothing
+        self.gas_estimator.get_gas_cost_for_network(network).await
     }
 
     // =========================================================================
@@ -387,82 +384,7 @@ impl SwapCrud {
         responses
     }
 
-    /// Internal helper to fetch from DB with filters
-    async fn fetch_currencies_from_db(&self, query: &CurrenciesQuery) -> Result<Vec<Currency>, SwapError> {
-        let mut sql = String::from(
-            "SELECT id, symbol, name, network, is_active, logo_url, contract_address, 
-             decimals, requires_extra_id, extra_id_name, min_amount, max_amount, 
-             last_synced_at, created_at, updated_at 
-             FROM currencies 
-             WHERE is_active = TRUE"
-        );
 
-        let mut sql_parts = Vec::new();
-
-        if let Some(ref ticker) = query.ticker {
-            sql_parts.push(format!("LOWER(symbol) = LOWER('{}')", ticker.replace("'", "''")));
-        }
-
-        if let Some(ref network) = query.network {
-            sql_parts.push(format!("network = '{}'", network.replace("'", "''")));
-        }
-
-        if let Some(memo) = query.memo {
-            sql_parts.push(format!("requires_extra_id = {}", memo));
-        }
-
-        if !sql_parts.is_empty() {
-            sql.push_str(" AND ");
-            sql.push_str(&sql_parts.join(" AND "));
-        }
-
-        sql.push_str(" ORDER BY symbol, network");
-
-        if let (Some(page), Some(limit)) = (query.page, query.limit) {
-            let offset = (page - 1) * limit;
-            sql.push_str(&format!(" LIMIT {} OFFSET {}", limit, offset));
-        }
-
-        sqlx::query_as::<_, Currency>(&sql)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| SwapError::DatabaseError(e.to_string()))
-    }
-
-    /// Triggers the background sync process if the cache is stale
-    async fn trigger_background_sync_if_needed(&self) {
-        if let Ok(true) = self.should_sync_currencies().await {
-            if let Some(redis) = &self.redis_service {
-                let redis = redis.clone();
-                let pool = self.pool.clone();
-                let wallet_mnemonic = self.wallet_mnemonic.clone();
-                
-                tokio::spawn(async move {
-                    if let Ok(true) = redis.try_lock("lock:sync_currencies", 60).await {
-                        tracing::info!("Acquired sync lock, starting background update...");
-                        let api_key = std::env::var("TROCADOR_API_KEY").unwrap_or_default();
-                        if !api_key.is_empty() {
-                            let client = TrocadorClient::new(api_key);
-                            let bg_crud = SwapCrud::new(pool, Some(redis.clone()), wallet_mnemonic);
-                            
-                            match bg_crud.sync_currencies_from_trocador(&client).await {
-                                Ok(count) => {
-                                    tracing::info!("Background sync complete. Updated {} currencies.", count);
-                                    // Invalidate/Update cache immediately after sync
-                                    // This requires fetching fresh data and setting it
-                                    // For simplicity, we just let the next read repopulate or TTL expire
-                                    // But optimally, we would:
-                                    // let fresh = bg_crud.fetch_currencies_from_db(&Default::default()).await...;
-                                    // redis.set_json("currencies:all", &fresh, 300).await...;
-                                },
-                                Err(e) => tracing::error!("Background sync failed: {}", e),
-                            }
-                        }
-                    }
-                });
-            }
-        }
-    }
 
     /// Get currencies from database with optional filtering
     pub async fn get_currencies(
@@ -545,35 +467,6 @@ impl SwapCrud {
         Ok(true) // No stats, sync needed
     }
 
-    /// Triggers the background sync process if the cache is stale (PER)
-    async fn trigger_background_provider_sync(&self) {
-        if let Ok(true) = self.should_sync_providers_per().await {
-            if let Some(redis) = &self.redis_service {
-                let redis = redis.clone();
-                let pool = self.pool.clone();
-                let wallet_mnemonic = self.wallet_mnemonic.clone();
-                
-                tokio::spawn(async move {
-                    if let Ok(true) = redis.try_lock("lock:sync_providers", 60).await {
-                        tracing::info!("Acquired sync lock, starting background provider update...");
-                        let api_key = std::env::var("TROCADOR_API_KEY").unwrap_or_default();
-                        if !api_key.is_empty() {
-                            let client = TrocadorClient::new(api_key);
-                            let bg_crud = SwapCrud::new(pool, Some(redis.clone()), wallet_mnemonic);
-                            
-                            match bg_crud.sync_providers_from_trocador(&client).await {
-                                Ok(count) => {
-                                    tracing::info!("Background sync complete. Updated {} providers.", count);
-                                    // Cache refresh happens inside sync_providers_from_trocador
-                                },
-                                Err(e) => tracing::error!("Background sync failed: {}", e),
-                            }
-                        }
-                    }
-                });
-            }
-        }
-    }
 
     /// Get providers with optimized caching and raw response support
     pub async fn get_providers_optimized(
@@ -676,28 +569,6 @@ impl SwapCrud {
             .collect()
     }
 
-    /// Helper to filter providers in memory
-    fn filter_providers_in_memory(&self, providers: Vec<Provider>, query: &ProvidersQuery) -> Vec<Provider> {
-        let mut filtered = providers;
-        
-        if let Some(ref rating) = query.rating {
-            filtered.retain(|p| p.kyc_rating == *rating);
-        }
-        
-        if let Some(markup) = query.markup_enabled {
-            filtered.retain(|p| p.markup_enabled == markup);
-        }
-        
-        // Sorting
-        match query.sort.as_deref() {
-            Some("name") => filtered.sort_by(|a, b| a.name.cmp(&b.name)),
-            Some("rating") => filtered.sort_by(|a, b| a.kyc_rating.cmp(&b.kyc_rating).then(a.name.cmp(&b.name))),
-            Some("eta") => filtered.sort_by(|a, b| a.eta_minutes.unwrap_or(0).cmp(&b.eta_minutes.unwrap_or(0))),
-            _ => filtered.sort_by(|a, b| a.name.cmp(&b.name)),
-        }
-        
-        filtered
-    }
 
     /// Sync providers from Trocador API and upsert into database
     pub async fn sync_providers_from_trocador(
@@ -841,6 +712,143 @@ impl SwapCrud {
             .map_err(|e| SwapError::DatabaseError(e.to_string()))?;
 
         Ok(providers)
+    }
+
+    // =========================================================================
+    // TRADING PAIRS
+    // =========================================================================
+
+    /// Get trading pairs with pagination, filtering, and sorting
+    pub async fn get_pairs(
+        &self,
+        query: super::schema::PairsQuery,
+    ) -> Result<super::schema::PairsResponse, SwapError> {
+        // Build the base query with joins
+        let mut count_sql = String::from(
+            "SELECT COUNT(DISTINCT tp.id) 
+             FROM trading_pairs tp
+             INNER JOIN currencies c1 ON tp.from_currency_id = c1.id
+             INNER JOIN currencies c2 ON tp.to_currency_id = c2.id
+             WHERE 1=1"
+        );
+
+        let mut data_sql = String::from(
+            "SELECT 
+                tp.id,
+                c1.symbol as base_currency,
+                c1.network as base_network,
+                c2.symbol as quote_currency,
+                c2.network as quote_network,
+                tp.is_active,
+                LEAST(c1.min_amount, c2.min_amount) as min_amount,
+                LEAST(c1.max_amount, c2.max_amount) as max_amount,
+                tp.updated_at
+             FROM trading_pairs tp
+             INNER JOIN currencies c1 ON tp.from_currency_id = c1.id
+             INNER JOIN currencies c2 ON tp.to_currency_id = c2.id
+             WHERE 1=1"
+        );
+
+        let mut conditions = Vec::new();
+
+        // Apply filters
+        if let Some(ref base) = query.base_currency {
+            conditions.push(format!("c1.symbol = '{}'", base.replace("'", "''")));
+        }
+        if let Some(ref quote) = query.quote_currency {
+            conditions.push(format!("c2.symbol = '{}'", quote.replace("'", "''")));
+        }
+        if let Some(ref base_net) = query.base_network {
+            conditions.push(format!("c1.network = '{}'", base_net.replace("'", "''")));
+        }
+        if let Some(ref quote_net) = query.quote_network {
+            conditions.push(format!("c2.network = '{}'", quote_net.replace("'", "''")));
+        }
+
+        // Status filter
+        match query.status.as_deref() {
+            Some("active") => conditions.push("tp.is_active = TRUE".to_string()),
+            Some("disabled") => conditions.push("tp.is_active = FALSE".to_string()),
+            Some("all") | None => {}, // No filter
+            _ => {}, // Invalid status, ignore
+        }
+
+        // Add conditions to both queries
+        if !conditions.is_empty() {
+            let condition_str = format!(" AND {}", conditions.join(" AND "));
+            count_sql.push_str(&condition_str);
+            data_sql.push_str(&condition_str);
+        }
+
+        // Get total count
+        let total: (i64,) = sqlx::query_as(&count_sql)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| SwapError::DatabaseError(e.to_string()))?;
+        let total_elements = total.0;
+
+        // Apply sorting
+        let order_clause = match query.order_by.as_deref() {
+            Some(order) if order.contains("name") => {
+                if order.contains("desc") {
+                    " ORDER BY c1.symbol DESC, c2.symbol DESC"
+                } else {
+                    " ORDER BY c1.symbol ASC, c2.symbol ASC"
+                }
+            },
+            Some(order) if order.contains("updated") => {
+                if order.contains("desc") {
+                    " ORDER BY tp.updated_at DESC"
+                } else {
+                    " ORDER BY tp.updated_at ASC"
+                }
+            },
+            _ => " ORDER BY c1.symbol ASC, c2.symbol ASC", // Default
+        };
+        data_sql.push_str(order_clause);
+
+        // Apply pagination
+        let offset = query.page * query.size;
+        data_sql.push_str(&format!(" LIMIT {} OFFSET {}", query.size, offset));
+
+        // Fetch data
+        let rows: Vec<(i64, String, String, String, String, bool, Option<f64>, Option<f64>, DateTime<Utc>)> = 
+            sqlx::query_as(&data_sql)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| SwapError::DatabaseError(e.to_string()))?;
+
+        // Convert to response
+        let pairs: Vec<super::schema::PairResponse> = rows.into_iter().map(|row| {
+            super::schema::PairResponse {
+                name: format!("{}/{}", row.1, row.3),
+                base_currency: row.1,
+                base_network: row.2,
+                quote_currency: row.3,
+                quote_network: row.4,
+                status: if row.5 { "active".to_string() } else { "disabled".to_string() },
+                min_amount: row.6,
+                max_amount: row.7,
+                last_updated: row.8,
+            }
+        }).collect();
+
+        // Calculate pagination info
+        let total_pages = ((total_elements as f64) / (query.size as f64)).ceil() as u32;
+        let has_next = query.page + 1 < total_pages;
+        let has_prev = query.page > 0;
+
+        Ok(super::schema::PairsResponse {
+            pairs,
+            pagination: super::schema::PairsPaginationInfo {
+                page: query.page,
+                size: query.size,
+                total_elements,
+                total_pages,
+                has_next,
+                has_prev,
+            },
+        })
     }
 
     // =========================================================================
@@ -1467,5 +1475,454 @@ impl SwapCrud {
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // SWAP HISTORY (Keyset Pagination)
+    // =========================================================================
+
+    /// Get user's swap history with keyset pagination for optimal performance
+    pub async fn get_swap_history(
+        &self,
+        user_id: &str,
+        query: super::schema::HistoryQuery,
+    ) -> Result<super::schema::HistoryResponse, SwapError> {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        
+        // 1. Validate and parse cursor
+        let cursor = if let Some(cursor_str) = &query.cursor {
+            let bytes = URL_SAFE_NO_PAD.decode(cursor_str)
+                .map_err(|e| SwapError::InvalidCursor(format!("Invalid base64: {}", e)))?;
+            let json = String::from_utf8(bytes)
+                .map_err(|e| SwapError::InvalidCursor(format!("Invalid UTF-8: {}", e)))?;
+            let c: super::schema::HistoryCursor = serde_json::from_str(&json)
+                .map_err(|e| SwapError::InvalidCursor(format!("Invalid JSON: {}", e)))?;
+            Some(c)
+        } else {
+            None
+        };
+        
+        // 2. Validate limit (min 1, max 100)
+        let limit = query.limit.min(100).max(1);
+        
+        // 3. Parse date filters
+        let date_from = query.date_from.as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+        let date_to = query.date_to.as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+        
+        // 4. Build dynamic SQL query with keyset pagination
+        let mut sql = String::from(
+            "SELECT 
+                id, user_id, provider_id,
+                CAST(status AS CHAR) as status,
+                from_currency, from_network, to_currency, to_network,
+                CAST(amount AS DOUBLE) as amount,
+                CAST(estimated_receive AS DOUBLE) as estimated_receive,
+                CAST(actual_receive AS DOUBLE) as actual_receive,
+                CAST(rate AS DOUBLE) as rate,
+                CAST(platform_fee AS DOUBLE) as platform_fee,
+                CAST(total_fee AS DOUBLE) as total_fee,
+                deposit_address, recipient_address,
+                CAST(rate_type AS CHAR) as rate_type,
+                is_sandbox,
+                created_at, completed_at
+            FROM swaps
+            WHERE user_id = ?"
+        );
+        
+        let mut bind_values: Vec<String> = vec![user_id.to_string()];
+        
+        // 5. Apply keyset cursor (CRITICAL for performance!)
+        if let Some(ref c) = cursor {
+            sql.push_str(" AND (created_at, id) < (?, ?)");
+            bind_values.push(c.created_at.to_rfc3339());
+            bind_values.push(c.id.clone());
+        }
+        
+        // 6. Apply filters
+        if let Some(ref status) = query.status {
+            sql.push_str(" AND status = ?");
+            bind_values.push(status.clone());
+        }
+        if let Some(ref from) = query.from_currency {
+            sql.push_str(" AND from_currency = ?");
+            bind_values.push(from.clone());
+        }
+        if let Some(ref to) = query.to_currency {
+            sql.push_str(" AND to_currency = ?");
+            bind_values.push(to.clone());
+        }
+        if let Some(ref provider) = query.provider {
+            sql.push_str(" AND provider_id = ?");
+            bind_values.push(provider.clone());
+        }
+        if let Some(dt) = date_from {
+            sql.push_str(" AND created_at >= ?");
+            bind_values.push(dt.to_rfc3339());
+        }
+        if let Some(dt) = date_to {
+            sql.push_str(" AND created_at <= ?");
+            bind_values.push(dt.to_rfc3339());
+        }
+        
+        // 7. Apply sorting (default: created_at DESC, id DESC)
+        let sort_by = query.sort_by.as_deref().unwrap_or("created_at");
+        let sort_order = query.sort_order.as_deref().unwrap_or("desc").to_uppercase();
+        sql.push_str(&format!(
+            " ORDER BY {} {}, id {}",
+            sort_by, sort_order, sort_order
+        ));
+        
+        // 8. Fetch limit + 1 to detect "has_more"
+        sql.push_str(&format!(" LIMIT {}", limit + 1));
+        
+        // 9. Build query with dynamic bindings
+        let mut query_builder = sqlx::query(&sql);
+        for value in &bind_values {
+            query_builder = query_builder.bind(value);
+        }
+        
+        // 10. Execute query
+        let rows = query_builder
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| SwapError::DatabaseError(e.to_string()))?;
+        
+        // 11. Process results
+        let has_more = rows.len() > limit as usize;
+        let swaps_data = if has_more {
+            &rows[..limit as usize]
+        } else {
+            &rows[..]
+        };
+        
+        // 12. Map to SwapSummary
+        let swaps: Vec<super::schema::SwapSummary> = swaps_data.iter().map(|row| {
+            use sqlx::Row;
+            
+            // Parse status string to enum
+            let status_str: String = row.get("status");
+            let status = match status_str.as_str() {
+                "waiting" => super::schema::SwapStatus::Waiting,
+                "confirming" => super::schema::SwapStatus::Confirming,
+                "exchanging" => super::schema::SwapStatus::Exchanging,
+                "sending" => super::schema::SwapStatus::Sending,
+                "funds_received" => super::schema::SwapStatus::Completed, // Map to completed
+                "completed" => super::schema::SwapStatus::Completed,
+                "failed" => super::schema::SwapStatus::Failed,
+                "refunded" => super::schema::SwapStatus::Refunded,
+                "expired" => super::schema::SwapStatus::Expired,
+                _ => super::schema::SwapStatus::Waiting,
+            };
+            
+            // Parse rate_type string to enum
+            let rate_type_str: String = row.get("rate_type");
+            let rate_type = match rate_type_str.as_str() {
+                "fixed" => super::schema::RateType::Fixed,
+                _ => super::schema::RateType::Floating,
+            };
+            
+            super::schema::SwapSummary {
+                id: row.get("id"),
+                status,
+                from_currency: row.get("from_currency"),
+                from_network: row.get("from_network"),
+                to_currency: row.get("to_currency"),
+                to_network: row.get("to_network"),
+                amount: row.get("amount"),
+                estimated_receive: row.get("estimated_receive"),
+                actual_receive: row.try_get("actual_receive").ok(),
+                rate: row.get("rate"),
+                platform_fee: row.get("platform_fee"),
+                total_fee: row.get("total_fee"),
+                deposit_address: row.get("deposit_address"),
+                recipient_address: row.get("recipient_address"),
+                provider: row.get("provider_id"),
+                rate_type,
+                is_sandbox: row.get::<i8, _>("is_sandbox") != 0,
+                created_at: row.get("created_at"),
+                completed_at: row.try_get("completed_at").ok(),
+            }
+        }).collect();
+        
+        // 13. Generate next cursor
+        let next_cursor = if has_more && !swaps.is_empty() {
+            let last = &swaps[swaps.len() - 1];
+            let cursor_obj = super::schema::HistoryCursor {
+                created_at: last.created_at,
+                id: last.id.clone(),
+                status: query.status.clone(),
+                from_currency: query.from_currency.clone(),
+                to_currency: query.to_currency.clone(),
+            };
+            let json = serde_json::to_string(&cursor_obj).unwrap();
+            Some(URL_SAFE_NO_PAD.encode(json.as_bytes()))
+        } else {
+            None
+        };
+        
+        // 14. Build response
+        Ok(super::schema::HistoryResponse {
+            swaps,
+            pagination: super::schema::PaginationInfo {
+                limit,
+                has_more,
+                next_cursor,
+            },
+            filters_applied: super::schema::FiltersApplied {
+                status: query.status,
+                from_currency: query.from_currency,
+                to_currency: query.to_currency,
+                provider: query.provider,
+                date_from: query.date_from,
+                date_to: query.date_to,
+            },
+        })
+    }
+
+    // =============================================================================
+    // ESTIMATE ENDPOINT - Quick rate preview without creating swap
+    // =============================================================================
+    
+    /// Get estimate with optimized caching (60s TTL + bucketing + PER)
+    pub async fn get_estimate_optimized(
+        &self,
+        query: &super::schema::EstimateQuery,
+    ) -> Result<super::schema::EstimateResponse, SwapError> {
+        use chrono::Utc;
+        
+        // 1. Generate cache keys (exact + bucketed)
+        let exact_key = format!(
+            "estimate:v2:{}:{}:{}:{}:{:.8}",
+            query.from.to_lowercase(),
+            query.to.to_lowercase(),
+            query.network_from,
+            query.network_to,
+            query.amount
+        );
+        
+        let bucketed_amount = Self::bucket_amount(query.amount);
+        let bucketed_key = format!(
+            "estimate:v2:{}:{}:{}:{}:{:.8}:bucket",
+            query.from.to_lowercase(),
+            query.to.to_lowercase(),
+            query.network_from,
+            query.network_to,
+            bucketed_amount
+        );
+        
+        // 2. Try exact cache first (10s TTL for repeated requests)
+        if let Some(service) = &self.redis_service {
+            if let Ok(Some(cached)) = service.get_json::<super::schema::EstimateCacheEntry>(&exact_key).await {
+                // Check if we should trigger early refresh (PER algorithm)
+                if !Self::should_early_refresh(&cached) {
+                    // Return cached response with updated metadata
+                    let now = Utc::now().timestamp_millis();
+                    let cache_age = ((now - cached.created_at) / 1000) as i64;
+                    let expires_in = ((cached.expires_at - now) / 1000).max(0) as i64;
+                    
+                    let mut response = cached.response.clone();
+                    response.cached = true;
+                    response.cache_age_seconds = cache_age;
+                    response.expires_in_seconds = expires_in;
+                    
+                    return Ok(response);
+                } else {
+                    // Trigger async refresh but return stale data
+                    let query_clone = query.clone();
+                    let pool_clone = self.pool.clone();
+                    let redis_clone = self.redis_service.clone();
+                    let wallet_clone = self.wallet_mnemonic.clone();
+                    
+                    tokio::spawn(async move {
+                        let crud = SwapCrud::new(pool_clone, redis_clone, wallet_clone);
+                        let _ = crud.fetch_estimate_from_api(&query_clone).await;
+                    });
+                    
+                    // Return stale data immediately
+                    let now = Utc::now().timestamp_millis();
+                    let cache_age = ((now - cached.created_at) / 1000) as i64;
+                    let mut response = cached.response.clone();
+                    response.cached = true;
+                    response.cache_age_seconds = cache_age;
+                    response.expires_in_seconds = 0;
+                    
+                    return Ok(response);
+                }
+            }
+            
+            // 3. Try bucketed cache (60s TTL for similar amounts)
+            if let Ok(Some(cached)) = service.get_json::<super::schema::EstimateCacheEntry>(&bucketed_key).await {
+                if !Self::should_early_refresh(&cached) {
+                    let now = Utc::now().timestamp_millis();
+                    let cache_age = ((now - cached.created_at) / 1000) as i64;
+                    let expires_in = ((cached.expires_at - now) / 1000).max(0) as i64;
+                    
+                    let mut response = cached.response.clone();
+                    response.cached = true;
+                    response.cache_age_seconds = cache_age;
+                    response.expires_in_seconds = expires_in;
+                    
+                    return Ok(response);
+                }
+            }
+        }
+        
+        // 4. Cache miss - fetch from API
+        self.fetch_estimate_from_api(query).await
+    }
+    
+    /// Fetch estimate from Trocador API and cache result
+    async fn fetch_estimate_from_api(
+        &self,
+        query: &super::schema::EstimateQuery,
+    ) -> Result<super::schema::EstimateResponse, SwapError> {
+        use chrono::Utc;
+        use std::time::Instant;
+        
+        let start_time = Instant::now();
+        
+        // 1. Fetch rates from Trocador (reuse existing logic)
+        let rates_query = super::schema::RatesQuery {
+            from: query.from.clone(),
+            network_from: query.network_from.clone(),
+            to: query.to.clone(),
+            network_to: query.network_to.clone(),
+            amount: query.amount,
+            rate_type: None,
+            provider: None,
+        };
+        
+        let rates_response = self.fetch_rates_from_api(&rates_query).await?;
+        
+        if rates_response.rates.is_empty() {
+            return Err(SwapError::PairNotAvailable);
+        }
+        
+        // 2. Calculate provider spread (volatility indicator)
+        let amounts: Vec<f64> = rates_response.rates.iter()
+            .map(|r| r.estimated_amount)
+            .collect();
+        let max_amount = amounts.iter().fold(0.0f64, |a, &b| a.max(b));
+        let min_amount = amounts.iter().fold(f64::MAX, |a, &b| a.min(b));
+        let provider_spread = if max_amount > 0.0 {
+            (max_amount - min_amount) / max_amount
+        } else {
+            0.0
+        };
+        
+        // 3. Estimate USD value (for slippage calculation)
+        let usd_price = match query.from.to_lowercase().as_str() {
+            "btc" => 60000.0,
+            "eth" => 3000.0,
+            "xmr" => 150.0,
+            "usdt" | "usdc" | "dai" => 1.0,
+            _ => 1.0,
+        };
+        let amount_usd = query.amount * usd_price;
+        
+        // 4. Build estimate response using pricing engine
+        let pricing_engine = PricingEngine::new();
+        let compute_time_ms = start_time.elapsed().as_millis() as i64;
+        
+        let response = pricing_engine.build_estimate_response(
+            rates_response.rates,
+            query,
+            provider_spread,
+            amount_usd,
+            false, // not cached
+            0,     // cache age
+            60,    // expires in 60s
+        );
+        
+        // 5. Cache the result
+        if let Some(service) = &self.redis_service {
+            let now = Utc::now().timestamp_millis();
+            
+            // Exact key cache (10s TTL)
+            let exact_key = format!(
+                "estimate:v2:{}:{}:{}:{}:{:.8}",
+                query.from.to_lowercase(),
+                query.to.to_lowercase(),
+                query.network_from,
+                query.network_to,
+                query.amount
+            );
+            let exact_entry = super::schema::EstimateCacheEntry {
+                response: response.clone(),
+                created_at: now,
+                expires_at: now + 10_000, // 10 seconds
+                compute_time_ms,
+            };
+            let _ = service.set_json(&exact_key, &exact_entry, 10).await;
+            
+            // Bucketed key cache (60s TTL)
+            let bucketed_amount = Self::bucket_amount(query.amount);
+            let bucketed_key = format!(
+                "estimate:v2:{}:{}:{}:{}:{:.8}:bucket",
+                query.from.to_lowercase(),
+                query.to.to_lowercase(),
+                query.network_from,
+                query.network_to,
+                bucketed_amount
+            );
+            let bucketed_entry = super::schema::EstimateCacheEntry {
+                response: response.clone(),
+                created_at: now,
+                expires_at: now + 60_000, // 60 seconds
+                compute_time_ms,
+            };
+            let _ = service.set_json(&bucketed_key, &bucketed_entry, 60).await;
+        }
+        
+        Ok(response)
+    }
+    
+    /// Bucket amount to reduce cache fragmentation
+    fn bucket_amount(amount: f64) -> f64 {
+        let bucket_size = if amount < 0.01 {
+            0.001
+        } else if amount < 1.0 {
+            0.01
+        } else if amount < 10.0 {
+            0.1
+        } else {
+            1.0
+        };
+        (amount / bucket_size).floor() * bucket_size
+    }
+    
+    /// Probabilistic Early Recomputation (PER) - XFetch algorithm
+    fn should_early_refresh(entry: &super::schema::EstimateCacheEntry) -> bool {
+        use chrono::Utc;
+        
+        let now = Utc::now().timestamp_millis();
+        let time_until_expiry = entry.expires_at - now;
+        
+        // Already expired
+        if time_until_expiry <= 0 {
+            return true;
+        }
+        
+        // Don't refresh if more than 90% TTL remains
+        let total_ttl = entry.expires_at - entry.created_at;
+        if time_until_expiry > (total_ttl as f64 * 0.9) as i64 {
+            return false;
+        }
+        
+        // PER formula: currentTime - (delta × beta × log(random())) >= expirationTime
+        let random: f64 = rand::random();
+        if random == 0.0 {
+            return true; // Guard against log(0)
+        }
+        
+        let delta = entry.compute_time_ms.max(100) as f64; // Minimum 100ms
+        let beta = 1.5; // Slightly aggressive for financial data
+        let threshold = delta * beta * (-random.ln());
+        
+        now + threshold as i64 >= entry.expires_at
     }
 }
